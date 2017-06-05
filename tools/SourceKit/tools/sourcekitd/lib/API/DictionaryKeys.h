@@ -1,12 +1,12 @@
-//===--- DictionaryKeys.h - --------------------------------------*- C++ -*-==//
+//===--- DictionaryKeys.h - -------------------------------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,6 +19,8 @@ namespace SourceKit {
 
 namespace sourcekitd {
 
+extern SourceKit::UIdent KeyVersionMajor;
+extern SourceKit::UIdent KeyVersionMinor;
 extern SourceKit::UIdent KeyResults;
 extern SourceKit::UIdent KeyRequest;
 extern SourceKit::UIdent KeyCompilerArgs;
@@ -26,17 +28,27 @@ extern SourceKit::UIdent KeyOffset;
 extern SourceKit::UIdent KeySourceFile;
 extern SourceKit::UIdent KeySourceText;
 extern SourceKit::UIdent KeyModuleName;
+extern SourceKit::UIdent KeyGroupName;
+extern SourceKit::UIdent KeyActionName;
+extern SourceKit::UIdent KeySynthesizedExtension;
 extern SourceKit::UIdent KeyNotification;
 extern SourceKit::UIdent KeyKeyword;
 extern SourceKit::UIdent KeyName;
+extern SourceKit::UIdent KeyNames;
+extern SourceKit::UIdent KeyUIDs;
 extern SourceKit::UIdent KeyEnableSyntaxMap;
 extern SourceKit::UIdent KeyEnableDiagnostics;
 extern SourceKit::UIdent KeySyntacticOnly;
 extern SourceKit::UIdent KeyLength;
+extern SourceKit::UIdent KeyActionable;
+extern SourceKit::UIdent KeyParentLoc;
 extern SourceKit::UIdent KeyKind;
 extern SourceKit::UIdent KeyAccessibility;
 extern SourceKit::UIdent KeySetterAccessibility;
 extern SourceKit::UIdent KeyUSR;
+extern SourceKit::UIdent KeyOriginalUSR;
+extern SourceKit::UIdent KeyDefaultImplementationOf;
+extern SourceKit::UIdent KeyInterestedUSR;
 extern SourceKit::UIdent KeyLine;
 extern SourceKit::UIdent KeyColumn;
 extern SourceKit::UIdent KeyReceiverUSR;
@@ -53,6 +65,7 @@ extern SourceKit::UIdent KeyDocFullAsXML;
 extern SourceKit::UIdent KeyGenericParams;
 extern SourceKit::UIdent KeyGenericRequirements;
 extern SourceKit::UIdent KeyAnnotatedDecl;
+extern SourceKit::UIdent KeyFullyAnnotatedDecl;
 extern SourceKit::UIdent KeyRelatedDecls;
 extern SourceKit::UIdent KeyContext;
 extern SourceKit::UIdent KeyModuleImportDepth;
@@ -90,12 +103,16 @@ extern SourceKit::UIdent KeyAttribute;
 extern SourceKit::UIdent KeyInheritedTypes;
 extern SourceKit::UIdent KeyFormatOptions;
 extern SourceKit::UIdent KeyCodeCompleteOptions;
+extern SourceKit::UIdent KeyFilterRules;
 extern SourceKit::UIdent KeyNextRequestStart;
 extern SourceKit::UIdent KeyPopular;
 extern SourceKit::UIdent KeyUnpopular;
+extern SourceKit::UIdent KeyHide;
+extern SourceKit::UIdent KeySimplified;
 
 extern SourceKit::UIdent KeyIsUnavailable;
 extern SourceKit::UIdent KeyIsDeprecated;
+extern SourceKit::UIdent KeyIsOptional;
 extern SourceKit::UIdent KeyPlatform;
 extern SourceKit::UIdent KeyMessage;
 extern SourceKit::UIdent KeyIntroduced;
@@ -103,6 +120,21 @@ extern SourceKit::UIdent KeyDeprecated;
 extern SourceKit::UIdent KeyObsoleted;
 extern SourceKit::UIdent KeyRemoveCache;
 extern SourceKit::UIdent KeyTypeInterface;
+extern SourceKit::UIdent KeyTypeUsr;
+extern SourceKit::UIdent KeyContainerTypeUsr;
+extern SourceKit::UIdent KeyModuleGroups;
+
+extern SourceKit::UIdent KeyRangeContent;
+extern SourceKit::UIdent KeyCancelOnSubsequentRequest;
+
+extern SourceKit::UIdent KeyBaseName;
+extern SourceKit::UIdent KeyArgNames;
+extern SourceKit::UIdent KeySelectorPieces;
+extern SourceKit::UIdent KeyNameKind;
+extern SourceKit::UIdent KeyLocalizationKey;
+extern SourceKit::UIdent KeyIsZeroArgSelector;
+
+extern SourceKit::UIdent KeySwiftVersion;
 
 /// \brief Used for determining the printing order of dictionary keys.
 bool compareDictKeys(SourceKit::UIdent LHS, SourceKit::UIdent RHS);

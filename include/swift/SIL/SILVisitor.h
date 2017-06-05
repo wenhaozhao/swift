@@ -1,12 +1,12 @@
-//===--- SILVisitor.h - Defines the SILVisitor class -------------*- C++ -*-==//
+//===--- SILVisitor.h - Defines the SILVisitor class ------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -31,7 +31,15 @@ class SILVisitor {
 public:
   ImplClass &asImpl() { return static_cast<ImplClass &>(*this); }
 
+  // Perform any required pre-processing before visiting.
+  // Sub-classes can override it to provide their custom
+  // pre-processing steps.
+  void beforeVisit(ValueBase *V) {
+  }
+
   ValueRetTy visit(ValueBase *V) {
+    asImpl().beforeVisit(V);
+
     switch (V->getKind()) {
 #define VALUE(CLASS, PARENT)                                \
   case ValueKind::CLASS:                                    \
@@ -39,10 +47,6 @@ public:
 #include "swift/SIL/SILNodes.def"
     }
     llvm_unreachable("Not reachable, all cases handled");
-  }
-
-  ValueRetTy visit(SILValue V) {
-    return asImpl().visit(V.getDef());
   }
 
   // Define default dispatcher implementations chain to parent nodes.
@@ -64,8 +68,7 @@ public:
   }
 
   void visitBasicBlockArguments(SILBasicBlock *BB) {
-    for (auto argI = BB->bbarg_begin(), argEnd = BB->bbarg_end();
-         argI != argEnd;
+    for (auto argI = BB->args_begin(), argEnd = BB->args_end(); argI != argEnd;
          ++argI)
       asImpl().visit(*argI);
   }

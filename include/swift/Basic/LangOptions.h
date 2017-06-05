@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,18 +15,50 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef SWIFT_LANGOPTIONS_H
-#define SWIFT_LANGOPTIONS_H
+#ifndef SWIFT_BASIC_LANGOPTIONS_H
+#define SWIFT_BASIC_LANGOPTIONS_H
 
 #include "swift/Basic/LLVM.h"
+#include "swift/Basic/Version.h"
 #include "clang/Basic/VersionTuple.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/Support/raw_ostream.h"
 #include <string>
+#include <vector>
 
 namespace swift {
+
+  /// Kind of implicit platform conditions.
+  enum class PlatformConditionKind {
+    /// The active os target (OSX, iOS, Linux, etc.)
+    OS,
+    /// The active arch target (x86_64, i386, arm, arm64, etc.)
+    Arch,
+    /// The active endianness target (big or little)
+    Endianness,
+    /// Runtime support (_ObjC or _Native)
+    Runtime,
+  };
+  enum { NumPlatformConditionKind = 4 };
+
+  /// Describes which Swift 3 Objective-C inference warnings should be
+  /// emitted.
+  enum class Swift3ObjCInferenceWarnings {
+    /// No warnings; this is the default.
+    None,
+    /// "Minimal" warnings driven by uses of declarations that make use of
+    /// the Objective-C entry point directly.
+    Minimal,
+    /// "Complete" warnings that add "@objc" for every entry point that
+    /// Swift 3 would have inferred as "@objc" but Swift 4 will not.
+    Complete,
+  };
+
   /// \brief A collection of options that affect the language dialect and
   /// provide compiler debugging facilities.
   class LangOptions {
@@ -41,16 +73,15 @@ namespace swift {
     /// Language features
     ///
 
-    /// \brief If true, all types are treated as resilient unless declared
-    /// @_fixed_layout.
-    bool EnableResilience = false;
+    /// \brief User-overridable language version to compile for.
+    version::Version EffectiveLanguageVersion = version::Version::getCurrentLanguageVersion();
 
     /// \brief Disable API availability checking.
     bool DisableAvailabilityChecking = false;
-    
-    /// Whether to warn about "needless" words in declarations.
-    bool WarnOmitNeedlessWords = false;
 
+    /// \brief Disable typo correction.
+    bool DisableTypoCorrection = false;
+    
     /// Should access control be respected?
     bool EnableAccessControl = true;
 
@@ -73,12 +104,6 @@ namespace swift {
     /// \brief Enable features useful for running playgrounds.
     // FIXME: This should probably be limited to the particular SourceFile.
     bool Playground = false;
-
-    /// Whether to delay adding enum protocol conformances during code
-    /// completion. This isn't completely correct with multiple files but is
-    /// currently necessary to get reasonable performance.
-    // FIXME: remove this when rdar://20047340 is fixed.
-    bool EnableCodeCompletionDelayedEnumConformanceHack = false;
 
     /// \brief Keep comments during lexing and attach them to declarations.
     bool AttachCommentsToDecls = false;
@@ -119,10 +144,14 @@ namespace swift {
     /// solver should be debugged.
     unsigned DebugConstraintSolverAttempt = 0;
 
+    /// \brief Enable the experimental constraint propagation in the
+    /// type checker.
+    bool EnableConstraintPropagation = false;
+
     /// \brief Enable the iterative type checker.
     bool IterativeTypeChecker = false;
 
-    /// Debug the generic signatures computed by the archetype builder.
+    /// Debug the generic signatures computed by the generic signature builder.
     bool DebugGenericSignatures = false;
 
     /// Triggers llvm fatal_error if typechecker tries to typecheck a decl or an
@@ -130,7 +159,7 @@ namespace swift {
     /// This is for testing purposes.
     std::string DebugForbidTypecheckPrefix;
 
-    /// Number of paralellel processes performing AST verification.
+    /// Number of parallel processes performing AST verification.
     unsigned ASTVerifierProcessCount = 1U;
 
     /// ID of the current process for the purposes of AST verification.
@@ -138,23 +167,80 @@ namespace swift {
 
     /// \brief The upper bound, in bytes, of temporary data that can be
     /// allocated by the constraint solver.
-    unsigned SolverMemoryThreshold = 15000000;
+    unsigned SolverMemoryThreshold = 512 * 1024 * 1024;
+
+    unsigned SolverBindingThreshold = 1024 * 1024;
+
+    /// The maximum depth to which to test decl circularity.
+    unsigned MaxCircularityDepth = 500;
 
     /// \brief Perform all dynamic allocations using malloc/free instead of
     /// optimized custom allocator, so that memory debugging tools can be used.
     bool UseMalloc = false;
-    
-    /// \brief Enable experimental "switch" pattern-matching features.
-    bool EnableExperimentalPatterns = false;
+
+    /// \brief Enable experimental property behavior feature.
+    bool EnableExperimentalPropertyBehaviors = false;
+
+    /// \brief Staging flag for treating inout parameters as Thread Sanitizer
+    /// accesses.
+    bool DisableTsanInoutInstrumentation = false;
+
+    /// \brief Staging flag for class resilience, which we do not want to enable
+    /// fully until more code is in place, to allow the standard library to be
+    /// tested with value type resilience only.
+    bool EnableClassResilience = false;
 
     /// Should we check the target OSs of serialized modules to see that they're
     /// new enough?
     bool EnableTargetOSChecking = true;
+
+    /// Whether to attempt to recover from missing cross-references and other
+    /// errors when deserializing from a Swift module.
+    ///
+    /// This is a staging flag; eventually it will be removed.
+    bool EnableDeserializationRecovery = true;
+
+    /// Should we use \c ASTScope-based resolution for unqualified name lookup?
+    bool EnableASTScopeLookup = false;
+
+    /// Whether to use the import as member inference system
+    ///
+    /// When importing a global, try to infer whether we can import it as a
+    /// member of some type instead. This includes inits, computed properties,
+    /// and methods.
+    bool InferImportAsMember = false;
+
+    /// If set to true, compile with the SIL Opaque Values enabled.
+    /// This is for bootstrapping. It can't be in SILOptions because the
+    /// TypeChecker uses it to set resolve the ParameterConvention.
+    bool EnableSILOpaqueValues = false;
+
+    /// If set to true, the diagnosis engine can assume the emitted diagnostics
+    /// will be used in editor. This usually leads to more aggressive fixit.
+    bool DiagnosticsEditorMode = false;
+
+    /// Whether to enable Swift 3 @objc inference, e.g., for members of
+    /// Objective-C-derived classes and 'dynamic' members.
+    bool EnableSwift3ObjCInference = false;
+
+    /// Warn about cases where Swift 3 would infer @objc but later versions
+    /// of Swift do not.
+    Swift3ObjCInferenceWarnings WarnSwift3ObjCInference =
+      Swift3ObjCInferenceWarnings::None;
+
+    /// Diagnose uses of NSCoding with classes that have unstable mangled names.
+    bool EnableNSKeyedArchiverDiagnostics = false;
     
-    /// Don't mangle the Self type as part of declaration manglings.
-    bool DisableSelfTypeMangling = true;
-    
-    /// Sets the target we are building for and updates configuration options
+    /// Enable keypath components that aren't fully implemented.
+    bool EnableExperimentalKeyPathComponents = false;
+
+    /// When a conversion from String to Substring fails, emit a fix-it to append
+    /// the void subscript '[]'.
+    /// FIXME: Remove this flag when void subscripts are implemented.
+    /// This is used to guard preemptive testing for the fix-it.
+    bool FixStringToSubstringConversions = false;
+
+    /// Sets the target we are building for and updates platform conditions
     /// to match.
     ///
     /// \returns A pair - the first element is true if the OS was invalid.
@@ -173,7 +259,9 @@ namespace swift {
         Target.getiOSVersion(major, minor, revision);
       } else if (Target.isWatchOS()) {
         Target.getOSVersion(major, minor, revision);
-      } else if (Target.isOSLinux() || Target.getTriple().empty()) {
+      } else if (Target.isOSLinux() || Target.isOSFreeBSD() ||
+                 Target.isAndroid() || Target.isOSWindows() ||
+                 Target.isPS4() || Target.getTriple().empty()) {
         major = minor = revision = 0;
       } else {
         llvm_unreachable("Unsupported target OS");
@@ -181,63 +269,70 @@ namespace swift {
       return clang::VersionTuple(major, minor, revision);
     }
 
-    /// Implicit target configuration options.  There are currently three
-    ///   supported target configuration values:
-    ///     os - The active os target (OSX or IOS)
-    ///     arch - The active arch target (X64, I386, ARM, ARM64)
-    ///     _runtime - Runtime support (_ObjC or _Native)
-    void addTargetConfigOption(StringRef Name, StringRef Value) {
-      assert(!Name.empty() && !Value.empty());
-      TargetConfigOptions.push_back(std::make_pair(Name, Value));
+    /// Sets an implicit platform condition.
+    void addPlatformConditionValue(PlatformConditionKind Kind, StringRef Value) {
+      assert(!Value.empty());
+      PlatformConditionValues.emplace_back(Kind, Value);
     }
 
-    /// Removes all configuration options added with addTargetConfigOption.
-    void clearAllTargetConfigOptions() {
-      TargetConfigOptions.clear();
+    /// Removes all values added with addPlatformConditionValue.
+    void clearAllPlatformConditionValues() {
+      PlatformConditionValues.clear();
     }
     
-    /// Returns the value for the given target configuration or an empty string.
-    StringRef getTargetConfigOption(StringRef Name) const;
-    
-    /// Explicit build configuration options, initialized via the '-D'
+    /// Returns the value for the given platform condition or an empty string.
+    StringRef getPlatformConditionValue(PlatformConditionKind Kind) const;
+
+    /// Explicit conditional compilation flags, initialized via the '-D'
     /// compiler flag.
-    void addBuildConfigOption(StringRef Name) {
+    void addCustomConditionalCompilationFlag(StringRef Name) {
       assert(!Name.empty());
-      BuildConfigOptions.push_back(Name);
+      CustomConditionalCompilationFlags.push_back(Name);
     }
 
-    /// Determines if a given build configuration has been defined.
-    bool hasBuildConfigOption(StringRef Name) const;
+    /// Determines if a given conditional compilation flag has been set.
+    bool isCustomConditionalCompilationFlagSet(StringRef Name) const;
 
-    ArrayRef<std::pair<std::string, std::string>>
-        getTargetConfigOptions() const {
-      return TargetConfigOptions;
+    ArrayRef<std::pair<PlatformConditionKind, std::string>>
+    getPlatformConditionValues() const {
+      return PlatformConditionValues;
     }
 
-    ArrayRef<std::string> getBuildConfigOptions() const {
-      return BuildConfigOptions;
+    ArrayRef<std::string> getCustomConditionalCompilationFlags() const {
+      return CustomConditionalCompilationFlags;
     }
 
-    /// The constant list of supported os build configuration arguments.
-    static const std::vector<std::string> SupportedOSBuildConfigArguments;
+    /// Whether our effective Swift version is in the Swift 3 family
+    bool isSwiftVersion3() const {
+      return EffectiveLanguageVersion.isVersion3();
+    }
 
-    /// Returns true if the os build configuration argument represents
+    /// Returns true if the given platform condition argument represents
     /// a supported target operating system.
-    static bool isOSBuildConfigSupported(StringRef OSName);
+    ///
+    /// \param suggestions Populated with suggested replacements
+    /// if a match is not found.
+    static bool checkPlatformConditionSupported(
+      PlatformConditionKind Kind, StringRef Value,
+      std::vector<StringRef> &suggestions);
 
-    /// The constant list of supported arch build configuration arguments.
-    static const std::vector<std::string> SupportedArchBuildConfigArguments;
-
-    /// Returns true if the arch build configuration argument represents
-    /// a supported target architecture.
-    static bool isArchBuildConfigSupported(StringRef ArchName);
+    /// Return a hash code of any components from these options that should
+    /// contribute to a Swift Bridging PCH hash.
+    llvm::hash_code getPCHHashComponents() const {
+      auto code = llvm::hash_value(Target.str());
+      SmallString<16> Scratch;
+      llvm::raw_svector_ostream OS(Scratch);
+      OS << EffectiveLanguageVersion;
+      code = llvm::hash_combine(code, OS.str());
+      return code;
+    }
 
   private:
-    llvm::SmallVector<std::pair<std::string, std::string>, 2>
-        TargetConfigOptions; 
-    llvm::SmallVector<std::string, 2> BuildConfigOptions;
+    llvm::SmallVector<std::pair<PlatformConditionKind, std::string>,
+                      NumPlatformConditionKind>
+        PlatformConditionValues;
+    llvm::SmallVector<std::string, 2> CustomConditionalCompilationFlags;
   };
-}
+} // end namespace swift
 
-#endif // LLVM_SWIFT_LANGOPTIONS_H
-
+#endif // SWIFT_BASIC_LANGOPTIONS_H

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,7 +16,7 @@
 namespace swift {
 
 class CanType;
-class ProtocolConformance;
+class NormalProtocolConformance;
 class ValueDecl;
 enum class SILLinkage : unsigned char;
 enum ForDefinition_t : bool;
@@ -91,6 +91,9 @@ FormalLinkage getTypeLinkage(CanType type);
 FormalLinkage getDeclLinkage(const ValueDecl *decl);
 SILLinkage getSILLinkage(FormalLinkage linkage,
                          ForDefinition_t forDefinition);
+SILLinkage
+getLinkageForProtocolConformance(const NormalProtocolConformance *C,
+                                 ForDefinition_t definition);
 
 } // end swift namespace
 

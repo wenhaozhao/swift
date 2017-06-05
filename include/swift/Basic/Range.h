@@ -1,33 +1,35 @@
-//===- Range.h - Classes for conveniently working with ranges ---*- C++ -*-===//
+//===--- Range.h - Classes for conveniently working with ranges -*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
-//
-//  This file provides classes and functions for conveniently working
-//  with ranges, 
-//
-//  reversed returns an iterator_range out of the reverse iterators of a type.
-//
-//  map creates an iterator_range which applies a function to all the elements
-//  in another iterator_range.
-//
-//  IntRange is a template class for iterating over a range of
-//  integers.
-//
-//  indices returns the range of indices from [0..size()) on a
-//  subscriptable type.
-//
-//  Note that this is kept in Swift because it's really only useful in
-//  C++11, and there aren't any major open-source subprojects of LLVM
-//  that can use C++11 yet.
-//
+///
+///  \file
+///
+///  This file provides classes and functions for conveniently working
+///  with ranges,
+///
+///  reversed returns an iterator_range out of the reverse iterators of a type.
+///
+///  map creates an iterator_range which applies a function to all the elements
+///  in another iterator_range.
+///
+///  IntRange is a template class for iterating over a range of
+///  integers.
+///
+///  indices returns the range of indices from [0..size()) on a
+///  subscriptable type.
+///
+///  Note that this is kept in Swift because it's really only useful in
+///  C++11, and there aren't any major open-source subprojects of LLVM
+///  that can use C++11 yet.
+///
 //===----------------------------------------------------------------------===//
 
 #ifndef SWIFT_BASIC_RANGE_H
@@ -38,6 +40,7 @@
 #include <utility>
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace swift {
   using llvm::make_range;
@@ -61,12 +64,13 @@ namespace swift {
   }
 
 /// A range of integers.  This type behaves roughly like an ArrayRef.
-template <class T> class IntRange {
+template <class T=unsigned> class IntRange {
   static_assert(std::is_integral<T>::value, "T must be an integer type");
   T Begin;
   T End;
 public:
   IntRange() : Begin(0), End(0) {}
+  IntRange(T end) : Begin(0), End(end) {}
   IntRange(T begin, T end) : Begin(begin), End(end) {
     assert(begin <= end);
   }
@@ -137,6 +141,10 @@ public:
   }
   T front() const { assert(!empty()); return Begin; }
   T back() const { assert(!empty()); return End - 1; }
+  IntRange drop_back(size_t length = 1) const {
+    assert(length <= size());
+    return IntRange(Begin, End - length);
+  }
 
   IntRange slice(size_t start) const {
     assert(start <= size());
@@ -163,6 +171,24 @@ typename std::enable_if<sizeof(std::declval<T>()[size_t(1)]) != 0,
                         IntRange<decltype(std::declval<T>().size())>>::type
 indices(const T &collection) {
   return IntRange<decltype(std::declval<T>().size())>(0, collection.size());
+}
+
+/// Returns an Int range [start, end).
+static inline IntRange<unsigned> range(unsigned start, unsigned end) {
+  assert(start <= end && "Invalid integral range");
+  return IntRange<unsigned>(start, end);
+}
+
+/// Returns an Int range [0, end).
+static inline IntRange<unsigned> range(unsigned end) {
+  return range(0, end);
+}
+
+/// Returns a reverse Int range (start, end].
+static inline auto reverse_range(unsigned start, unsigned end) ->
+  decltype(reversed(range(start+1, end+1))) {
+  assert(start <= end && "Invalid integral range");
+  return reversed(range(start+1, end+1));
 }
 
 /// A random access range that provides iterators that can be used to iterate
@@ -256,30 +282,6 @@ template <class T> EnumeratorRange<T> enumerate(T Begin, T End) {
   return EnumeratorRange<T>(Begin, End);
 }
 
-/// An adaptor of std::any_of for ranges.
-template <class Range, class Predicate>
-inline
-bool
-any_of(Range R, Predicate P) {
-  return std::any_of(R.begin(), R.end(), P);
-}
+} // end namespace swift
 
-/// An adaptor of std::all_of for ranges.
-template <class Range, class Predicate>
-inline
-bool
-all_of(Range R, Predicate P) {
-  return std::all_of(R.begin(), R.end(), P);
-}
-
-/// An adaptor of std::none_of for ranges.
-template <class Range, class Predicate>
-inline
-bool
-none_of(Range R, Predicate P) {
-  return std::none_of(R.begin(), R.end(), P);
-}
-
-} // namespace swift
-
-#endif
+#endif // SWIFT_BASIC_RANGE_H

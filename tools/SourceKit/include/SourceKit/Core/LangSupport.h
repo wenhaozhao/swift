@@ -1,12 +1,12 @@
-//===--- LangSupport.h - -----------------------------------------*- C++ -*-==//
+//===--- LangSupport.h - ----------------------------------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -27,39 +27,20 @@ namespace llvm {
   class MemoryBuffer;
 }
 namespace SourceKit {
-  class Context;
 
 struct EntityInfo {
-  enum TypeKind {
-    Base,
-    FuncDecl,
-    CallReference
-  };
-  TypeKind EntityType = Base;
-
   UIdent Kind;
-  llvm::SmallString<32> Name;
-  llvm::SmallString<64> USR;
+  StringRef Name;
+  StringRef USR;
+  StringRef Group;
+  StringRef ReceiverUSR;
+  bool IsDynamic = false;
+  bool IsTestCandidate = false;
   unsigned Line = 0;
   unsigned Column = 0;
+  ArrayRef<UIdent> Attrs;
 
   EntityInfo() = default;
-
-protected:
-  EntityInfo(TypeKind TK) : EntityType(TK) { }
-};
-
-struct FuncDeclEntityInfo : public EntityInfo {
-  bool IsTestCandidate = false;
-
-  FuncDeclEntityInfo() : EntityInfo(FuncDecl) { }
-};
-
-struct CallRefEntityInfo : public EntityInfo {
-  llvm::SmallString<64> ReceiverUSR;
-  bool IsDynamic = false;
-
-  CallRefEntityInfo() : EntityInfo(CallReference) { }
 };
 
 class IndexingConsumer {
@@ -164,6 +145,21 @@ struct CustomCompletionInfo {
   swift::OptionSet<Context> Contexts;
 };
 
+struct FilterRule {
+  enum Kind {
+    Everything,
+    Module,
+    Keyword,
+    Literal,
+    CustomCompletion,
+    Identifier,
+  };
+  Kind kind;
+  bool hide;
+  std::vector<StringRef> names; ///< Must be null-terminated.
+  std::vector<UIdent> uids;
+};
+
 enum class DiagnosticSeverityKind {
   Warning,
   Error
@@ -227,7 +223,7 @@ public:
                                                  unsigned Length) = 0;
 
   virtual bool recordAffectedRange(unsigned Offset, unsigned Length) = 0;
-  
+
   virtual bool recordAffectedLineRange(unsigned Line, unsigned Length) = 0;
 
   virtual bool recordFormattedText(StringRef Text) = 0;
@@ -257,10 +253,19 @@ struct CursorInfo {
   StringRef Name;
   StringRef USR;
   StringRef TypeName;
+  StringRef TypeUSR;
+  StringRef ContainerTypeUSR;
   StringRef DocComment;
-  StringRef TypeInteface;
+  StringRef TypeInterface;
+  StringRef GroupName;
+  /// A key for documentation comment localization, if it exists in the doc
+  /// comment for the declaration.
+  StringRef LocalizationKey;
   /// Annotated XML pretty printed declaration.
   StringRef AnnotatedDeclaration;
+  /// Fully annotated XML pretty printed declaration.
+  /// FIXME: this should eventually replace \c AnnotatedDeclaration.
+  StringRef FullyAnnotatedDeclaration;
   /// Non-empty if the symbol was imported from a clang module.
   StringRef ModuleName;
   /// Non-empty if a generated interface editor document has previously been
@@ -275,7 +280,27 @@ struct CursorInfo {
   ArrayRef<StringRef> OverrideUSRs;
   /// Related declarations, overloaded functions etc., in annotated XML form.
   ArrayRef<StringRef> AnnotatedRelatedDeclarations;
+  /// All groups of the module name under cursor.
+  ArrayRef<StringRef> ModuleGroupArray;
+  /// All available actions on the code under cursor.
+  ArrayRef<StringRef> AvailableActions;
   bool IsSystem = false;
+  llvm::Optional<unsigned> ParentNameOffset;
+};
+
+struct RangeInfo {
+  bool IsCancelled = false;
+  UIdent RangeKind;
+  StringRef ExprType;
+  StringRef RangeContent;
+};
+
+struct NameTranslatingInfo {
+  bool IsCancelled = false;
+  UIdent NameKind;
+  StringRef BaseName;
+  std::vector<StringRef> ArgNames;
+  bool IsZeroArgSelector = false;
 };
 
 struct RelatedIdentsInfo {
@@ -304,15 +329,21 @@ struct DocGenericParam {
 struct DocEntityInfo {
   UIdent Kind;
   llvm::SmallString<32> Name;
+  llvm::SmallString<32> SubModuleName;
   llvm::SmallString<32> Argument;
   llvm::SmallString<64> USR;
+  llvm::SmallString<64> OriginalUSR;
+  llvm::SmallString<64> ProvideImplementationOfUSR;
   llvm::SmallString<64> DocComment;
+  llvm::SmallString<64> FullyAnnotatedDecl;
+  llvm::SmallString<64> LocalizationKey;
   std::vector<DocGenericParam> GenericParams;
   std::vector<std::string> GenericRequirements;
   unsigned Offset = 0;
   unsigned Length = 0;
   bool IsUnavailable = false;
   bool IsDeprecated = false;
+  bool IsOptional = false;
   swift::Type Ty;
 };
 
@@ -356,6 +387,9 @@ class LangSupport {
   virtual void anchor();
 
 public:
+  /// A separator between parts in a synthesized usr.
+  const static std::string SynthesizedUSRSeparator;
+
   virtual ~LangSupport() { }
 
   virtual void indexSource(StringRef Filename,
@@ -368,8 +402,8 @@ public:
                             ArrayRef<const char *> Args) = 0;
 
   virtual void codeCompleteOpen(StringRef name, llvm::MemoryBuffer *inputBuf,
-                                unsigned offset,
-                                OptionsDictionary *options,
+                                unsigned offset, OptionsDictionary *options,
+                                ArrayRef<FilterRule> filterRules,
                                 GroupedCodeCompletionConsumer &consumer,
                                 ArrayRef<const char *> args) = 0;
 
@@ -397,12 +431,21 @@ public:
   virtual void editorOpenInterface(EditorConsumer &Consumer,
                                    StringRef Name,
                                    StringRef ModuleName,
-                                   ArrayRef<const char *> Args) = 0;
+                                   Optional<StringRef> Group,
+                                   ArrayRef<const char *> Args,
+                                   bool SynthesizedExtensions,
+                                   Optional<StringRef> InterestedUSR) = 0;
+
+  virtual void editorOpenTypeInterface(EditorConsumer &Consumer,
+                                       ArrayRef<const char *> Args,
+                                       StringRef TypeUSR) = 0;
 
   virtual void editorOpenHeaderInterface(EditorConsumer &Consumer,
                                          StringRef Name,
                                          StringRef HeaderName,
-                                         ArrayRef<const char *> Args) = 0;
+                                         ArrayRef<const char *> Args,
+                                         bool SynthesizedExtensions,
+                                         Optional<unsigned> swiftVersion) = 0;
 
   virtual void editorOpenSwiftSourceInterface(StringRef Name,
                                               StringRef SourceName,
@@ -424,16 +467,39 @@ public:
   virtual void editorExtractTextFromComment(StringRef Source,
                                             EditorConsumer &Consumer) = 0;
 
+  virtual void editorConvertMarkupToXML(StringRef Source,
+                                        EditorConsumer &Consumer) = 0;
+
   virtual void editorExpandPlaceholder(StringRef Name, unsigned Offset,
                                        unsigned Length,
                                        EditorConsumer &Consumer) = 0;
 
   virtual void getCursorInfo(StringRef Filename, unsigned Offset,
+                             unsigned Length, bool Actionables,
+                             bool CancelOnSubsequentRequest,
                              ArrayRef<const char *> Args,
                           std::function<void(const CursorInfo &)> Receiver) = 0;
 
+
+  virtual void getNameInfo(StringRef Filename, unsigned Offset,
+                           NameTranslatingInfo &Input,
+                           ArrayRef<const char *> Args,
+                std::function<void(const NameTranslatingInfo &)> Receiver) = 0;
+
+  virtual void getRangeInfo(StringRef Filename, unsigned Offset, unsigned Length,
+                            bool CancelOnSubsequentRequest,
+                            ArrayRef<const char *> Args,
+                            std::function<void(const RangeInfo&)> Receiver) = 0;
+
+  virtual void
+  getCursorInfoFromUSR(StringRef Filename, StringRef USR,
+                       bool CancelOnSubsequentRequest,
+                       ArrayRef<const char *> Args,
+                       std::function<void(const CursorInfo &)> Receiver) = 0;
+
   virtual void findRelatedIdentifiersInFile(StringRef Filename,
                                             unsigned Offset,
+                                            bool CancelOnSubsequentRequest,
                                             ArrayRef<const char *> Args,
                    std::function<void(const RelatedIdentsInfo &)> Receiver) = 0;
 
@@ -444,13 +510,15 @@ public:
                                      ArrayRef<const char *> Args,
                     std::function<void(const InterfaceDocInfo &)> Receiver) = 0;
 
+  virtual void findModuleGroups(StringRef ModuleName,
+                                ArrayRef<const char *> Args,
+                                std::function<void(ArrayRef<StringRef>,
+                                                   StringRef Error)> Receiver) = 0;
+
   virtual void getDocInfo(llvm::MemoryBuffer *InputBuf,
                           StringRef ModuleName,
                           ArrayRef<const char *> Args,
                           DocInfoConsumer &Consumer) = 0;
-
-  static std::unique_ptr<LangSupport> createSwiftLangSupport(
-                                                     SourceKit::Context &SKCtx);
 };
 
 } // namespace SourceKit

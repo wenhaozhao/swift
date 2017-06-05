@@ -1,6 +1,6 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
-enum MSV : ErrorType {
+enum MSV : Error {
   case Foo, Bar, Baz
   case CarriesInt(Int)
 
@@ -8,7 +8,7 @@ enum MSV : ErrorType {
   var code: Int { return 0 }
 }
 
-func opaque_error() -> ErrorType { return MSV.Foo }
+func opaque_error() -> Error { return MSV.Foo }
 
 func one() {
   do {
@@ -37,12 +37,28 @@ func one() {
 
   do {
     throw opaque_error()
-  } catch is ErrorType {  // expected-warning {{'is' test is always true}}
+  } catch is Error {  // expected-warning {{'is' test is always true}}
+  }
+  
+  func foo() throws {}
+  
+  do {
+#if false
+    try foo()
+#endif
+  } catch {    // don't warn, #if code should be scanned.
+  }
+
+  do {
+#if false
+    throw opaque_error()
+#endif
+  } catch {    // don't warn, #if code should be scanned.
   }
 }
 
-func takesAutoclosure(@autoclosure fn : () -> Int) {}
-func takesThrowingAutoclosure(@autoclosure fn : () throws -> Int) {}
+func takesAutoclosure(_ fn : @autoclosure () -> Int) {}
+func takesThrowingAutoclosure(_ fn : @autoclosure () throws -> Int) {}
 
 func genError() throws -> Int { throw MSV.Foo }
 func genNoError() -> Int { return 0 }
@@ -70,11 +86,11 @@ func testAutoclosures() throws {
 struct IllegalContext {
   var x: Int = genError() // expected-error {{call can throw, but errors cannot be thrown out of a property initializer}}
 
-  func foo(x: Int = genError()) {} // expected-error {{call can throw, but errors cannot be thrown out of a default argument}}
+  func foo(_ x: Int = genError()) {} // expected-error {{call can throw, but errors cannot be thrown out of a default argument}}
 
   func catcher() throws {
     do {
-      try genError()
+      _ = try genError()
     } catch MSV.CarriesInt(genError()) { // expected-error {{call can throw, but errors cannot be thrown out of a catch pattern}}
     } catch MSV.CarriesInt(let i) where i == genError() { // expected-error {{call can throw, but errors cannot be thrown out of a catch guard expression}}
     }
@@ -83,10 +99,10 @@ struct IllegalContext {
 
 func illformed() throws {
     do {
-      try genError()
+      _ = try genError()
 
     // TODO: this recovery is terrible
-    } catch MSV.CarriesInt(let i) where i == genError()) { // expected-error {{call can throw, but errors cannot be thrown out of a catch guard expression}} expected-error {{expected '{'}} expected-error {{braced block of statements is an unused closure}} expected-error {{expression resolves to an unused function}}
+    } catch MSV.CarriesInt(let i) where i == genError()) { // expected-error {{call can throw, but errors cannot be thrown out of a catch guard expression}} expected-error {{expected '{'}} expected-error {{closure expression is unused}} expected-note {{did you mean to use a 'do' statement?}} {{58-58=do }}
     }
 }
 
@@ -94,8 +110,23 @@ func postThrows() -> Int throws { // expected-error{{'throws' may only occur bef
   return 5
 }
 
-func postRethrows(f: () throws -> Int) -> Int rethrows { // expected-error{{'rethrows' may only occur before '->'}}{{40-40=rethrows }}{{46-55=}}
+func postThrows2() -> throws Int { // expected-error{{'throws' may only occur before '->'}}{{20-22=throws}}{{23-29=->}}
+  return try postThrows()
+}
+
+func postRethrows(_ f: () throws -> Int) -> Int rethrows { // expected-error{{'rethrows' may only occur before '->'}}{{42-42=rethrows }}{{48-57=}}
   return try f()
+}
+
+func postRethrows2(_ f: () throws -> Int) -> rethrows Int { // expected-error{{'rethrows' may only occur before '->'}}{{43-45=rethrows}}{{46-54=->}}
+  return try f()
+}
+
+func incompleteThrowType() {
+  // FIXME: Bad recovery for incomplete function type.
+  let _: () throws
+  // expected-error @-1 {{consecutive statements on a line must be separated by ';'}}
+  // expected-error @-2 {{expected expression}}
 }
 
 // rdar://21328447
@@ -104,5 +135,5 @@ func fixitThrow1() throw -> Int {} // expected-error{{expected throwing specifie
 func fixitThrow2() throws {
   var _: (Int)
   throw MSV.Foo
-  var _: Int throw -> Int // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{14-19=throws}}
+  var _: (Int) throw -> Int // expected-error{{expected throwing specifier; did you mean 'throws'?}} {{16-21=throws}}
 }

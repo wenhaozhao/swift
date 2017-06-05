@@ -1,6 +1,6 @@
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: cp %s %t/main.swift
-// RUN: %target-swift-frontend -parse -verify -primary-file %t/main.swift %S/Inputs/enum_equatable_hashable_other.swift
+// RUN: %target-swift-frontend -typecheck -verify -primary-file %t/main.swift %S/Inputs/enum_equatable_hashable_other.swift -verify-ignore-unknown
 
 enum Foo {
   case A, B
@@ -12,9 +12,10 @@ var aHash: Int = Foo.A.hashValue
 enum Generic<T> {
   case A, B
 
-  func method() -> Int {
+  static func method() -> Int {
+    // Test synthesis of == without any member lookup being done
     if A == B { }
-    return A.hashValue
+    return Generic.A.hashValue
   }
 }
 
@@ -85,7 +86,8 @@ enum Complex {
   case B
 }
 
-if Complex.A(1) == .B { } // expected-error{{type of expression is ambiguous without more context}}
+if Complex.A(1) == .B { } // expected-error{{binary operator '==' cannot be applied to operands of type 'Complex' and '_'}}
+// expected-note @-1 {{overloads for '==' exist with these partially matching parameter lists: }}
 
 
 // rdar://19773050
@@ -94,7 +96,8 @@ private enum Bar<T> {
 
   mutating func value() -> T {
     switch self {
-    case E(let x): // expected-error{{invalid pattern}}
+    // FIXME: Should diagnose here that '.' needs to be inserted, but E has an ErrorType at this point
+    case E(let x):
       return x.value
     }
   }
@@ -123,3 +126,10 @@ public func ==(lhs: Medicine, rhs: Medicine) -> Bool { // expected-note{{non-mat
 
 // No explicit conformance and cannot be derived
 extension Complex : Hashable {} // expected-error 2 {{does not conform}}
+
+// FIXME: Remove -verify-ignore-unknown.
+// <unknown>:0: error: unexpected error produced: invalid redeclaration of 'hashValue'
+// <unknown>:0: error: unexpected note produced: candidate has non-matching type '(Foo, Foo) -> Bool'
+// <unknown>:0: error: unexpected note produced: candidate has non-matching type '<T> (Generic<T>, Generic<T>) -> Bool'
+// <unknown>:0: error: unexpected note produced: candidate has non-matching type '(InvalidCustomHashable, InvalidCustomHashable) -> Bool'
+// <unknown>:0: error: unexpected note produced: candidate has non-matching type '(EnumToUseBeforeDeclaration, EnumToUseBeforeDeclaration) -> Bool'

@@ -1,12 +1,12 @@
-//===--- DynamicsCasts.h - SIL dynamic-cast utilities -----------*- C++ -*-===//
+//===--- DynamicCasts.h - SIL dynamic-cast utilities ------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -24,7 +24,6 @@ class CanType;
 class ModuleDecl;
 class SILBuilder;
 class SILLocation;
-class SILValue;
 class SILModule;
 class SILType;
 enum class CastConsumptionKind : unsigned char;
@@ -39,6 +38,16 @@ enum class DynamicCastFeasibility {
   /// The cast cannot succeed.
   WillFail,
 };
+
+static inline DynamicCastFeasibility
+atWorst(DynamicCastFeasibility feasibility, DynamicCastFeasibility worstCase) {
+  return (feasibility > worstCase ? worstCase : feasibility);
+}
+
+static inline DynamicCastFeasibility
+atBest(DynamicCastFeasibility feasibility, DynamicCastFeasibility bestCase) {
+  return (feasibility < bestCase ? bestCase : feasibility);
+}
 
 /// Classify the feasibility of a dynamic cast.  The source and target
 /// types should be unlowered formal types.
@@ -78,8 +87,12 @@ void emitIndirectConditionalCastWithScalar(
 /// \brief Does the type conform to the _ObjectiveCBridgeable protocol.
 bool isObjectiveCBridgeable(ModuleDecl *M, CanType Ty);
 
-/// \brief Does the type conform to the _Error protocol.
-bool isErrorType(ModuleDecl *M, CanType Ty);
+/// \brief Get the bridged NS class of a CF class if it exists. Returns
+/// an empty CanType if such class does not exist.
+CanType getNSBridgedClassOfCFClass(ModuleDecl *M, CanType type);
+
+/// \brief Does the type conform to Error.
+bool isError(ModuleDecl *M, CanType Ty);
 } // end namespace swift
 
 #endif

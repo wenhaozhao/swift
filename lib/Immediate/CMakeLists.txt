@@ -1,12 +1,12 @@
-add_swift_library(swiftImmediate
+add_swift_library(swiftImmediate STATIC
   Immediate.cpp
   REPL.cpp
   LINK_LIBRARIES
     swiftIDE
     swiftFrontend
     swiftSILGen
-    swiftSILPasses
+    swiftSILOptimizer
     swiftIRGen
-  COMPONENT_DEPENDS
+  LLVM_COMPONENT_DEPENDS
     linker mcjit)
 

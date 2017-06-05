@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 struct Interval {
@@ -22,7 +22,7 @@ prefix func -(a: Interval) -> Interval {
   return Interval(-a.hi, -a.lo)
 }
 
-func print(a: Interval) {
+func print(_ a: Interval) {
   print("[\(a.lo), \(a.hi)]")
 }
 

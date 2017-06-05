@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -44,8 +44,8 @@ public:
     Projected operator*() const { return Project(*Ptr); }
     iterator &operator++() { Ptr++; return *this; }
     iterator operator++(int) { return iterator(Ptr++); }
-    bool operator==(iterator rhs) { return Ptr == rhs.Ptr; }
-    bool operator!=(iterator rhs) { return Ptr != rhs.Ptr; }
+    bool operator==(iterator rhs) const { return Ptr == rhs.Ptr; }
+    bool operator!=(iterator rhs) const { return Ptr != rhs.Ptr; }
 
     iterator &operator+=(difference_type i) {
       Ptr += i;
@@ -100,6 +100,6 @@ public:
   }
 };
 
-}
+} // end namespace swift
 
-#endif
+#endif // SWIFT_BASIC_ARRAYREFVIEW_H

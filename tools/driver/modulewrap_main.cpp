@@ -1,12 +1,12 @@
-//===-- modulewrap_main.cpp - module wrapping utility -----------===//
+//===--- modulewrap_main.cpp - module wrapping utility --------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -29,7 +29,6 @@
 #include "llvm/Option/Option.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 
@@ -144,9 +143,7 @@ int modulewrap_main(ArrayRef<const char *> Args, const char *Argv0,
   }
 
   // Superficially verify that the input is a swift module file.
-  llvm::BitstreamReader Reader((unsigned char *)(*ErrOrBuf)->getBufferStart(),
-                               (unsigned char *)(*ErrOrBuf)->getBufferEnd());
-  llvm::BitstreamCursor Cursor(Reader);
+  llvm::BitstreamCursor Cursor(ErrOrBuf.get()->getMemBufferRef());
   for (unsigned char Byte : serialization::MODULE_SIGNATURE)
     if (Cursor.AtEndOfStream() || Cursor.Read(8) != Byte) {
       Instance.getDiags().diagnose(SourceLoc(), diag::error_parse_input_file,
@@ -154,16 +151,26 @@ int modulewrap_main(ArrayRef<const char *> Args, const char *Argv0,
       return 1;
     }
 
-  // Wrap the bitstream in an object file.
+  // Wrap the bitstream in a module object file. To use the ClangImporter to
+  // create the module loader, we need to properly set the runtime library path.
+  SearchPathOptions SearchPathOpts;
+  // FIXME: This logic has been duplicated from
+  //        CompilerInvocation::setMainExecutablePath. ModuleWrapInvocation
+  //        should share its implementation.
+  SmallString<128> RuntimeResourcePath(MainExecutablePath);
+  llvm::sys::path::remove_filename(RuntimeResourcePath); // Remove /swift
+  llvm::sys::path::remove_filename(RuntimeResourcePath); // Remove /bin
+  llvm::sys::path::append(RuntimeResourcePath, "lib", "swift");
+  SearchPathOpts.RuntimeResourcePath = RuntimeResourcePath.str();
+
   SourceManager SrcMgr;
   LangOptions LangOpts;
-  SearchPathOptions SearchPathOpts;
   LangOpts.Target = Invocation.getTargetTriple();
   ASTContext ASTCtx(LangOpts, SearchPathOpts, SrcMgr, Instance.getDiags());
   ClangImporterOptions ClangImporterOpts;
-  ASTCtx.addModuleLoader(ClangImporter::create(ASTCtx, ClangImporterOpts),
+  ASTCtx.addModuleLoader(ClangImporter::create(ASTCtx, ClangImporterOpts, ""),
                          true);
-  Module *M = Module::create(ASTCtx.getIdentifier("swiftmodule"), ASTCtx);
+  ModuleDecl *M = ModuleDecl::create(ASTCtx.getIdentifier("swiftmodule"), ASTCtx);
   SILOptions SILOpts;
   std::unique_ptr<SILModule> SM = SILModule::createEmptyModule(M, SILOpts);
   createSwiftModuleObjectFile(*SM, (*ErrOrBuf)->getBuffer(),

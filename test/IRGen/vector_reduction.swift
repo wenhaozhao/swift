@@ -1,6 +1,9 @@
-// RUN: %target-swift-frontend -Ounchecked %s -emit-ir | FileCheck %s
+// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -Ounchecked %s -emit-ir | %FileCheck %s
 
 // REQUIRES: CPU=x86_64
+
+// rdar://30579970
+// REQUIRES: optimized_stdlib
 
 // We were missing target transform info and not vectorizing the loop below.
 

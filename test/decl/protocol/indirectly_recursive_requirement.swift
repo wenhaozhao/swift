@@ -1,31 +1,31 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol Incrementable  {
   func successor() -> Self
 }
 
-protocol _ForwardIndexType  {
-  typealias Distance  = MyInt
+protocol _ForwardIndex  {
+  associatedtype Distance  = MyInt // expected-note{{declared here}}
 }
 
-protocol ForwardIndexType : _ForwardIndexType {
+protocol ForwardIndex : _ForwardIndex {
 }
 
-protocol _BidirectionalIndexType : _ForwardIndexType {
+protocol _BidirectionalIndex : _ForwardIndex {
   func predecessor() -> Self
 }
 
-protocol BidirectionalIndexType : ForwardIndexType, _BidirectionalIndexType {
+protocol BidirectionalIndex : ForwardIndex, _BidirectionalIndex {
 }
 
-protocol _RandomAccessIndexType : _BidirectionalIndexType {
-  typealias Distance
+protocol _RandomAccessIndex : _BidirectionalIndex {
+  associatedtype Distance // expected-warning{{redeclaration of associated type 'Distance}}
 }
 
-protocol RandomAccessIndexType 
-  : BidirectionalIndexType, _RandomAccessIndexType {}
+protocol RandomAccessIndex 
+  : BidirectionalIndex, _RandomAccessIndex {}
 
-struct MyInt : RandomAccessIndexType
+struct MyInt : RandomAccessIndex
 {
   typealias Distance = MyInt
 

@@ -2,31 +2,35 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
-//
-// A storage structure for holding a destructured rvalue with an optional
-// cleanup(s).
-// Ownership of the rvalue can be "forwarded" to disable the associated
-// cleanup(s).
-//
+///
+/// \file
+///
+/// A storage structure for holding a destructured rvalue with an optional
+/// cleanup(s).
+///
+/// Ownership of the rvalue can be "forwarded" to disable the associated
+/// cleanup(s).
+///
 //===----------------------------------------------------------------------===//
 
 #ifndef SWIFT_LOWERING_RVALUE_H
 #define SWIFT_LOWERING_RVALUE_H
 
 #include "ManagedValue.h"
-#include "SILGenFunction.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace swift {
 namespace Lowering {
-  class Initialization;
+
+class Initialization;
+class SILGenFunction;
 
 /// An "exploded" SIL rvalue, in which tuple values are recursively
 /// destructured. (In SILGen we don't try to explode structs, because doing so
@@ -50,8 +54,12 @@ class RValue {
   }
   
   /// Private constructor used by copy().
-  RValue(const RValue &copied, SILGenFunction &gen, SILLocation l);
+  RValue(const RValue &copied, SILGenFunction &SGF, SILLocation l);
   
+  /// Construct an RValue from a pre-exploded set of
+  /// ManagedValues. Used to implement the extractElement* methods.
+  RValue(ArrayRef<ManagedValue> values, CanType type);
+
 public:
   /// Creates an invalid RValue object, in a "used" state.
   RValue() : elementsToBeAdded(Used) {}
@@ -77,20 +85,27 @@ public:
     return *this;
   }
   
-  /// Create a RValue from a single value. If the value is of tuple type, it
+  /// Create an RValue from a single value. If the value is of tuple type, it
   /// will be exploded.
   ///
   /// \param expr - the expression which yielded this r-value; its type
   ///   will become the substituted formal type of this r-value
-  RValue(SILGenFunction &gen, Expr *expr, ManagedValue v);
+  RValue(SILGenFunction &SGF, Expr *expr, ManagedValue v);
 
-  /// Create a RValue from a single value. If the value is of tuple type, it
+  /// Create an RValue from a single value. If the value is of tuple type, it
   /// will be exploded.
-  RValue(SILGenFunction &gen, SILLocation l, CanType type, ManagedValue v);
+  RValue(SILGenFunction &SGF, SILLocation l, CanType type, ManagedValue v);
 
   /// Construct an RValue from a pre-exploded set of
   /// ManagedValues. Used to implement the extractElement* methods.
-  RValue(ArrayRef<ManagedValue> values, CanType type);
+  static RValue withPreExplodedElements(ArrayRef<ManagedValue> values,
+                                        CanType type);
+  
+  /// Create an RValue to which values will be subsequently added using
+  /// addElement(), with the level of tuple expansion in the input specified
+  /// by the abstraction pattern. The RValue will not be complete until all
+  /// the elements have been added.
+  explicit RValue(AbstractionPattern pattern, CanType type);
   
   /// Create an RValue to which values will be subsequently added using
   /// addElement(). The RValue will not be complete until all the elements have
@@ -104,6 +119,9 @@ public:
   /// True if this rvalue has been used.
   bool isUsed() const & { return elementsToBeAdded == Used; }
   explicit operator bool() const & { return !isUsed(); }
+
+  /// True if this rvalue was emitted into context.
+  bool isInContext() const & { return isUsed(); }
   
   /// True if this represents an lvalue.
   bool isLValue() const & {
@@ -115,24 +133,24 @@ public:
   
   /// Add a ManagedValue element to the rvalue, exploding tuples if necessary.
   /// The rvalue must not yet be complete.
-  void addElement(SILGenFunction &gen, ManagedValue element,
+  void addElement(SILGenFunction &SGF, ManagedValue element,
                   CanType formalType, SILLocation l) &;
   
   /// Forward an rvalue into a single value, imploding tuples if necessary.
-  SILValue forwardAsSingleValue(SILGenFunction &gen, SILLocation l) &&;
+  SILValue forwardAsSingleValue(SILGenFunction &SGF, SILLocation l) &&;
 
   /// Forward an rvalue into a single value, imploding tuples if necessary, and
   /// introducing a potential conversion from semantic type to storage type.
-  SILValue forwardAsSingleStorageValue(SILGenFunction &gen,
+  SILValue forwardAsSingleStorageValue(SILGenFunction &SGF,
                                        SILType storageType,
                                        SILLocation l) &&;
 
   /// Get the rvalue as a single value, imploding tuples if necessary.
-  ManagedValue getAsSingleValue(SILGenFunction &gen, SILLocation l) &&;
+  ManagedValue getAsSingleValue(SILGenFunction &SGF, SILLocation l) &&;
   
   /// Get the rvalue as a single unmanaged value, imploding tuples if necessary.
   /// The values must not require any cleanups.
-  SILValue getUnmanagedSingleValue(SILGenFunction &gen, SILLocation l) const &;
+  SILValue getUnmanagedSingleValue(SILGenFunction &SGF, SILLocation l) const &;
   
   /// Peek at the single scalar value backing this rvalue without consuming it.
   /// The rvalue must not be of a tuple type.
@@ -159,17 +177,20 @@ public:
   }
 
   /// Use this rvalue to initialize an Initialization.
-  void forwardInto(SILGenFunction &gen, Initialization *I, SILLocation Loc) &&;
+  void forwardInto(SILGenFunction &SGF, SILLocation loc, Initialization *I) &&;
 
   /// Copy this rvalue to initialize an Initialization without consuming the
   /// rvalue.
-  void copyInto(SILGenFunction &gen, Initialization *I, SILLocation Loc) const&;
+  void copyInto(SILGenFunction &SGF, SILLocation loc, Initialization *I) const&;
+
+  /// Assign this r-value into the destination.
+  void assignInto(SILGenFunction &SGF, SILLocation loc, SILValue destAddr) &&;
   
   /// Forward the exploded SILValues into a SmallVector.
-  void forwardAll(SILGenFunction &gen,
+  void forwardAll(SILGenFunction &SGF,
                   SmallVectorImpl<SILValue> &values) &&;
 
-  ManagedValue materialize(SILGenFunction &gen, SILLocation loc) &&;
+  ManagedValue materialize(SILGenFunction &SGF, SILLocation loc) &&;
   
   /// Take the ManagedValues from this RValue into a SmallVector.
   void getAll(SmallVectorImpl<ManagedValue> &values) &&;
@@ -197,23 +218,12 @@ public:
   }
   
   /// Emit an equivalent value with independent ownership.
-  RValue copy(SILGenFunction &gen, SILLocation l) const & {
-    return RValue(*this, gen, l);
+  RValue copy(SILGenFunction &SGF, SILLocation l) const & {
+    return RValue(*this, SGF, l);
   }
 
-  bool isObviouslyEqual(const RValue &rhs) const {
-    assert(isComplete() && rhs.isComplete() && "Comparing incomplete rvalues");
-
-    // Compare the count of elements instead of the type.
-    if (values.size() != rhs.values.size())
-      return false;
-
-    return std::equal(values.begin(), values.end(), rhs.values.begin(),
-                  [](const ManagedValue &lhs, const ManagedValue &rhs) -> bool {
-                    return lhs.getValue() == rhs.getValue() &&
-                    lhs.getCleanup() == rhs.getCleanup();
-                  });
-  }
+  static bool areObviouslySameValue(SILValue lhs, SILValue rhs);
+  bool isObviouslyEqual(const RValue &rhs) const;
 };
 
 } // end namespace Lowering

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -22,14 +22,15 @@
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Sema.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/APSIntType.h"
 #include "swift/AST/ASTContext.h"
-#include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/Stmt.h"
 #include "swift/AST/Types.h"
 #include "swift/ClangImporter/ClangModule.h"
 
 using namespace swift;
+using namespace importer;
 
 Optional<clang::Module *>
 ClangImporter::Implementation::getClangSubmoduleForMacro(
@@ -50,9 +51,7 @@ ClangModuleUnit *ClangImporter::Implementation::getClangModuleForMacro(
   // ClangModule.
   auto *M = maybeModule.getValue()->getTopLevelModule();
 
-  auto &importer =
-    static_cast<ClangImporter &>(*SwiftContext.getClangModuleLoader());
-  return getWrapperForModule(importer, M);
+  return getWrapperForModule(M);
 }
 
 template <typename T = clang::Expr>
@@ -65,10 +64,24 @@ parseNumericLiteral(ClangImporter::Implementation &impl,
   return nullptr;
 }
 
+// FIXME: Duplicated from ImportDecl.cpp.
 static bool isInSystemModule(DeclContext *D) {
-  if (cast<ClangModuleUnit>(D->getModuleScopeContext())->isSystemModule())
-    return true;
-  return false;
+  return cast<ClangModuleUnit>(D->getModuleScopeContext())->isSystemModule();
+}
+
+static ValueDecl *
+createMacroConstant(ClangImporter::Implementation &Impl,
+                    const clang::MacroInfo *macro,
+                    Identifier name,
+                    DeclContext *dc,
+                    Type type,
+                    const clang::APValue &value,
+                    ConstantConvertKind convertKind,
+                    bool isStatic,
+                    ClangNode ClangN) {
+  Impl.ImportedMacroConstants[macro] = {value, type};
+  return Impl.createConstant(name, dc, type, value, convertKind, isStatic,
+                             ClangN);
 }
 
 static ValueDecl *importNumericLiteral(ClangImporter::Implementation &Impl,
@@ -77,7 +90,8 @@ static ValueDecl *importNumericLiteral(ClangImporter::Implementation &Impl,
                                        Identifier name,
                                        const clang::Token *signTok,
                                        const clang::Token &tok,
-                                       const clang::MacroInfo *ClangN) {
+                                       const clang::MacroInfo *ClangN,
+                                       clang::QualType castType) {
   assert(tok.getKind() == clang::tok::numeric_constant &&
          "not a numeric token");
   {
@@ -97,11 +111,22 @@ static ValueDecl *importNumericLiteral(ClangImporter::Implementation &Impl,
 
   if (const clang::Expr *parsed = parseNumericLiteral<>(Impl, tok)) {
     auto clangTy = parsed->getType();
-    auto type = Impl.importType(clangTy, ImportTypeKind::Value,
-                                isInSystemModule(DC),
-                                /*isFullyBridgeable*/false);
-    if (!type)
+    auto literalType = Impl.importType(clangTy, ImportTypeKind::Value,
+                                       isInSystemModule(DC),
+                                       /*isFullyBridgeable*/false);
+    if (!literalType)
       return nullptr;
+
+    Type constantType;
+    if (castType.isNull()) {
+      constantType = literalType;
+    } else {
+      constantType = Impl.importType(castType, ImportTypeKind::Value,
+                                     isInSystemModule(DC),
+                                     /*isFullyBridgeable*/false);
+      if (!constantType)
+        return nullptr;
+    }
 
     if (auto *integer = dyn_cast<clang::IntegerLiteral>(parsed)) {
       // Determine the value.
@@ -118,7 +143,8 @@ static ValueDecl *importNumericLiteral(ClangImporter::Implementation &Impl,
         }
       }
 
-      return Impl.createConstant(name, DC, type, clang::APValue(value),
+      return createMacroConstant(Impl, MI, name, DC, constantType,
+                                 clang::APValue(value),
                                  ConstantConvertKind::Coerce,
                                  /*static*/ false, ClangN);
     }
@@ -135,7 +161,8 @@ static ValueDecl *importNumericLiteral(ClangImporter::Implementation &Impl,
         value.changeSign();
       }
 
-      return Impl.createConstant(name, DC, type, clang::APValue(value),
+      return createMacroConstant(Impl, MI, name, DC, constantType,
+                                 clang::APValue(value),
                                  ConstantConvertKind::Coerce,
                                  /*static*/ false, ClangN);
     }
@@ -192,11 +219,12 @@ static ValueDecl *importLiteral(ClangImporter::Implementation &Impl,
                                 const clang::MacroInfo *MI,
                                 Identifier name,
                                 const clang::Token &tok,
-                                const clang::MacroInfo *ClangN) {
+                                const clang::MacroInfo *ClangN,
+                                clang::QualType castType) {
   switch (tok.getKind()) {
   case clang::tok::numeric_constant:
     return importNumericLiteral(Impl, DC, MI, name, /*signTok*/nullptr, tok,
-                                ClangN);
+                                ClangN, castType);
 
   case clang::tok::string_literal:
   case clang::tok::utf8_string_literal:
@@ -217,7 +245,7 @@ static ValueDecl *importNil(ClangImporter::Implementation &Impl,
   auto type = TupleType::getEmpty(Impl.SwiftContext);
   return Impl.createUnavailableDecl(name, DC, type,
                                     "use 'nil' instead of this imported macro",
-                                    /*static=*/false, clangN);
+                                    /*isStatic=*/false, clangN);
 }
 
 static bool isSignToken(const clang::Token &tok) {
@@ -225,40 +253,92 @@ static bool isSignToken(const clang::Token &tok) {
          tok.is(clang::tok::tilde);
 }
 
-/// Returns true if it is expected that the macro is ignored.
-bool ClangImporter::Implementation::shouldIgnoreMacro(StringRef name,
-                                                const clang::MacroInfo *macro) {
-  // Ignore include guards.
-  if (macro->isUsedForHeaderGuard())
-    return true;
-
-  if (macro->tokens_empty())
-    return true;
-
-  // Consult the blacklist of macros to suppress.
-  auto suppressMacro =
-    llvm::StringSwitch<bool>(name)
-#define SUPPRESS_MACRO(NAME) .Case(#NAME, true)
-#include "MacroTable.def"
-    .Default(false);
-
-  if (suppressMacro)
-    return true;
-
-  return false;
+static Optional<clang::QualType> builtinTypeForToken(const clang::Token &tok,
+    const clang::ASTContext &context) {
+  switch (tok.getKind()) {
+  case clang::tok::kw_short:
+    return clang::QualType(context.ShortTy);
+  case clang::tok::kw_long:
+    return clang::QualType(context.LongTy);
+  case clang::tok::kw___int64:
+    return clang::QualType(context.LongLongTy);
+  case clang::tok::kw___int128:
+    return clang::QualType(context.Int128Ty);
+  case clang::tok::kw_signed:
+    return clang::QualType(context.IntTy);
+  case clang::tok::kw_unsigned:
+    return clang::QualType(context.UnsignedIntTy);
+  case clang::tok::kw_void:
+    return clang::QualType(context.VoidTy);
+  case clang::tok::kw_char:
+    return clang::QualType(context.CharTy);
+  case clang::tok::kw_int:
+    return clang::QualType(context.IntTy);
+  case clang::tok::kw_float:
+    return clang::QualType(context.FloatTy);
+  case clang::tok::kw_double:
+    return clang::QualType(context.DoubleTy);
+  case clang::tok::kw_wchar_t:
+    return clang::QualType(context.WCharTy);
+  case clang::tok::kw_bool:
+    return clang::QualType(context.BoolTy);
+  case clang::tok::kw_char16_t:
+    return clang::QualType(context.Char16Ty);
+  case clang::tok::kw_char32_t:
+    return clang::QualType(context.Char32Ty);
+  default:
+    return llvm::None;
+  }
 }
+
+static Optional<std::pair<llvm::APSInt, Type>>
+  getIntegerConstantForMacroToken(ClangImporter::Implementation &impl,
+                                  DeclContext *DC,
+                                  const clang::Token &token) {
+
+  // Integer literal.
+  if (token.is(clang::tok::numeric_constant)) {
+    if (auto literal = parseNumericLiteral<clang::IntegerLiteral>(impl,token)) {
+      auto value = llvm::APSInt { literal->getValue(),
+                                  literal->getType()->isUnsignedIntegerType() };
+      auto type  = impl.importType(literal->getType(),
+                                   ImportTypeKind::Value,
+                                   isInSystemModule(DC),
+                                   /*isFullyBridgeable*/false);
+      return {{ value, type }};
+    }
+
+  // Macro identifier.
+  } else if (token.is(clang::tok::identifier) &&
+             token.getIdentifierInfo()->hasMacroDefinition()) {
+
+    auto rawID      = token.getIdentifierInfo();
+    auto macroInfo  = impl.getClangPreprocessor().getMacroInfo(rawID);
+    auto importedID = impl.getNameImporter().importMacroName(rawID, macroInfo);
+    impl.importMacro(importedID, macroInfo);
+
+    auto searcher = impl.ImportedMacroConstants.find(macroInfo);
+    if (searcher == impl.ImportedMacroConstants.end()) {
+      return None;
+    }
+    auto importedConstant = searcher->second;
+    if (!importedConstant.first.isInt()) {
+      return None;
+    }
+    return {{ importedConstant.first.getInt(), importedConstant.second }};
+  }
+
+  return None;
+}
+
 
 static ValueDecl *importMacro(ClangImporter::Implementation &impl,
                               DeclContext *DC,
                               Identifier name,
                               const clang::MacroInfo *macro,
-                              const clang::MacroInfo *ClangN) {
-  if (impl.shouldIgnoreMacro(name.str(), macro))
-    return nullptr;
-
-  // Currently we only convert non-function-like macros.
-  if (macro->isFunctionLike())
-    return nullptr;
+                              const clang::MacroInfo *ClangN,
+                              clang::QualType castType) {
+  if (name.empty()) return nullptr;
 
   auto numTokens = macro->getNumTokens();
   auto tokenI = macro->tokens_begin(), tokenE = macro->tokens_end();
@@ -272,6 +352,49 @@ static ValueDecl *importMacro(ClangImporter::Implementation &impl,
     numTokens -= 2;
   }
 
+  // Handle tokens starting with a type cast
+  bool castTypeIsId = false;
+  if (numTokens > 3 &&
+      tokenI[0].is(clang::tok::l_paren) &&
+      (tokenI[1].is(clang::tok::identifier) ||
+        impl.getClangSema().isSimpleTypeSpecifier(tokenI[1].getKind())) &&
+      tokenI[2].is(clang::tok::r_paren)) {
+    if (!castType.isNull()) {
+      // this is a nested cast
+      return nullptr;
+    }
+
+    if (tokenI[1].is(clang::tok::identifier)) {
+      auto identifierInfo = tokenI[1].getIdentifierInfo();
+      if (identifierInfo->isStr("id")) {
+        castTypeIsId = true;
+      }
+      auto identifierName = identifierInfo->getName();
+      auto &identifier = impl.getClangASTContext().Idents.get(identifierName);
+      auto parsedType = impl.getClangSema().getTypeName(identifier,
+                                                        clang::SourceLocation(),
+                                                        /*scope*/nullptr);
+      if (parsedType) {
+        castType = parsedType.get();
+      } else {
+        return nullptr;
+      }
+      if (!castType->isBuiltinType() && !castTypeIsId) {
+        return nullptr;
+      }
+    } else {
+      auto builtinType = builtinTypeForToken(tokenI[1],
+                                             impl.getClangASTContext());
+      if (builtinType) {
+        castType = builtinType.getValue();
+      } else {
+        return nullptr;
+      }
+    }
+    tokenI += 3;
+    numTokens -= 3;
+  }
+
   // FIXME: Ask Clang to try to parse and evaluate the expansion as a constant
   // expression instead of doing these special-case pattern matches.
   switch (numTokens) {
@@ -279,10 +402,17 @@ static ValueDecl *importMacro(ClangImporter::Implementation &impl,
     // Check for a single-token expansion of the form <literal>.
     // TODO: or <identifier>.
     const clang::Token &tok = *tokenI;
-    
+
+    if (castTypeIsId && tok.is(clang::tok::numeric_constant)) {
+      auto *integerLiteral =
+        parseNumericLiteral<clang::IntegerLiteral>(impl, tok);
+      if (integerLiteral && integerLiteral->getValue() == 0)
+        return importNil(impl, DC, name, ClangN);
+    }
+
     // If it's a literal token, we might be able to translate the literal.
     if (tok.isLiteral()) {
-      return importLiteral(impl, DC, macro, name, tok, ClangN);
+      return importLiteral(impl, DC, macro, name, tok, ClangN, castType);
     }
 
     if (tok.is(clang::tok::identifier)) {
@@ -299,8 +429,11 @@ static ValueDecl *importMacro(ClangImporter::Implementation &impl,
           return importNil(impl, DC, name, ClangN);
 
         auto macroID = impl.getClangPreprocessor().getMacroInfo(clangID);
-        if (macroID && macroID != macro)
-          return importMacro(impl, DC, name, macroID, ClangN);
+        if (macroID && macroID != macro) {
+          // FIXME: This was clearly intended to pass the cast type down, but
+          // doing so would be a behavior change.
+          return importMacro(impl, DC, name, macroID, ClangN, /*castType*/{});
+        }
       }
 
       // FIXME: If the identifier refers to a declaration, alias it?
@@ -316,43 +449,160 @@ static ValueDecl *importMacro(ClangImporter::Implementation &impl,
     // but are pervasive in C headers anyway.
     clang::Token const &first = tokenI[0];
     clang::Token const &second = tokenI[1];
-    
+
     if (isSignToken(first) && second.is(clang::tok::numeric_constant))
-      return importNumericLiteral(impl, DC, macro, name, &first, second, ClangN);
+      return importNumericLiteral(impl, DC, macro, name, &first, second, ClangN,
+                                  castType);
 
     // We also allow @"string".
     if (first.is(clang::tok::at) && isStringToken(second))
       return importStringLiteral(impl, DC, macro, name, second,
                                  MappedStringLiteralKind::NSString, ClangN);
-
     break;
   }
   case 3: {
-    // Check for a three-token expression of the form <number> << <number>.
-    // No signs or inner parentheses are allowed here.
-    // FIXME: What about people who define BIT_MASK(pos) helper macros?
-    if (tokenI[0].is(clang::tok::numeric_constant) &&
-        tokenI[1].is(clang::tok::lessless) &&
-        tokenI[2].is(clang::tok::numeric_constant)) {
-      auto *base = parseNumericLiteral<clang::IntegerLiteral>(impl, tokenI[0]);
-      auto *shift = parseNumericLiteral<clang::IntegerLiteral>(impl, tokenI[2]);
-      if (!base || !shift)
-        return nullptr;
+    // Check for infix operations between two integer constants.
+    // Import the result as another integer constant:
+    //   #define INT3 (INT1 <op> INT2)
+    // Doesn't allow inner parentheses.
 
-      auto clangTy = base->getType();
-      auto type = impl.importType(clangTy, ImportTypeKind::Value,
-                                  isInSystemModule(DC),
-                                  /*isFullyBridgeable*/false);
-      if (!type)
-        return nullptr;
-
-      llvm::APSInt value{ base->getValue() << shift->getValue(),
-                          clangTy->isUnsignedIntegerType() };
-      return impl.createConstant(name, DC, type, clang::APValue(value),
-                                 ConstantConvertKind::Coerce, /*static=*/false,
-                                 ClangN);
+    // Parse INT1.
+    llvm::APSInt firstValue;
+    Type firstSwiftType = nullptr;
+    if (auto firstInt = getIntegerConstantForMacroToken(impl, DC, tokenI[0])) {
+      firstValue     = firstInt->first;
+      firstSwiftType = firstInt->second;
+    } else {
+      return nullptr;
     }
-    break;
+
+    // Parse INT2.
+    llvm::APSInt secondValue;
+    Type secondSwiftType = nullptr;
+    if (auto secondInt = getIntegerConstantForMacroToken(impl, DC, tokenI[2])) {
+      secondValue     = secondInt->first;
+      secondSwiftType = secondInt->second;
+    } else {
+      return nullptr;
+    }
+
+    llvm::APSInt resultValue;
+    Type resultSwiftType = nullptr;
+
+    // Resolve width and signedness differences and find the type of the result.
+    auto firstIntSpec  = clang::ento::APSIntType(firstValue);
+    auto secondIntSpec = clang::ento::APSIntType(secondValue);
+    if (firstIntSpec == std::max(firstIntSpec, secondIntSpec)) {
+      firstIntSpec.apply(secondValue);
+      resultSwiftType = firstSwiftType;
+    } else {
+      secondIntSpec.apply(firstValue);
+      resultSwiftType = secondSwiftType;
+    }
+
+    // Addition.
+    if (tokenI[1].is(clang::tok::plus)) {
+      resultValue = firstValue + secondValue;
+
+    // Subtraction.
+    } else if (tokenI[1].is(clang::tok::minus)) {
+      resultValue = firstValue - secondValue;
+
+    // Multiplication.
+    } else if (tokenI[1].is(clang::tok::star)) {
+      resultValue = firstValue * secondValue;
+
+    // Division.
+    } else if (tokenI[1].is(clang::tok::slash)) {
+      if (secondValue == 0) { return nullptr; }
+      resultValue = firstValue / secondValue;
+
+    // Left-shift.
+    } else if (tokenI[1].is(clang::tok::lessless)) {
+      // Shift by a negative number is UB in C. Don't import.
+      if (secondValue.isNegative()) { return nullptr; }
+      resultValue = llvm::APSInt { firstValue.shl(secondValue),
+                                   firstValue.isUnsigned() };
+
+    // Right-shift.
+    } else if (tokenI[1].is(clang::tok::greatergreater)) {
+      // Shift by a negative number is UB in C. Don't import.
+      if (secondValue.isNegative()) { return nullptr; }
+      if (firstValue.isUnsigned()) {
+        resultValue = llvm::APSInt { firstValue.lshr(secondValue),
+                                     /*isUnsigned*/ true };
+      } else {
+        resultValue = llvm::APSInt { firstValue.ashr(secondValue),
+                                     /*isUnsigned*/ false };
+      }
+
+    // Bitwise OR.
+    } else if (tokenI[1].is(clang::tok::pipe)) {
+      firstValue.setIsUnsigned(true);
+      secondValue.setIsUnsigned(true);
+      resultValue = llvm::APSInt { firstValue | secondValue,
+                                   /*isUnsigned*/ true };
+
+    // Bitwise AND.
+    } else if (tokenI[1].is(clang::tok::amp)) {
+      firstValue.setIsUnsigned(true);
+      secondValue.setIsUnsigned(true);
+      resultValue = llvm::APSInt { firstValue & secondValue,
+                                   /*isUnsigned*/ true };
+
+    // XOR.
+    } else if (tokenI[1].is(clang::tok::caret)) {
+      firstValue.setIsUnsigned(true);
+      secondValue.setIsUnsigned(true);
+      resultValue = llvm::APSInt { firstValue ^ secondValue,
+                                   /*isUnsigned*/ true };
+
+    // Logical OR.
+    } else if (tokenI[1].is(clang::tok::pipepipe)) {
+      bool result  = firstValue.getBoolValue() || secondValue.getBoolValue();
+      resultValue  = llvm::APSInt::get(result);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Logical AND.
+    } else if (tokenI[1].is(clang::tok::ampamp)) {
+      bool result  = firstValue.getBoolValue() && secondValue.getBoolValue();
+      resultValue  = llvm::APSInt::get(result);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Equality.
+    } else if (tokenI[1].is(clang::tok::equalequal)) {
+      resultValue     = llvm::APSInt::get(firstValue == secondValue);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Less than.
+    } else if (tokenI[1].is(clang::tok::less)) {
+      resultValue     = llvm::APSInt::get(firstValue < secondValue);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Less than or equal.
+    } else if (tokenI[1].is(clang::tok::lessequal)) {
+      resultValue     = llvm::APSInt::get(firstValue <= secondValue);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Greater than.
+    } else if (tokenI[1].is(clang::tok::greater)) {
+      resultValue     = llvm::APSInt::get(firstValue > secondValue);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Greater than or equal.
+    } else if (tokenI[1].is(clang::tok::greaterequal)) {
+      resultValue     = llvm::APSInt::get(firstValue >= secondValue);
+      resultSwiftType = impl.SwiftContext.getBoolDecl()->getDeclaredType();
+
+    // Unhandled operators.
+    } else {
+      return nullptr;
+    }
+
+    return createMacroConstant(impl, macro, name, DC, resultSwiftType,
+                               clang::APValue(resultValue),
+                               ConstantConvertKind::Coerce,
+                               /*isStatic=*/false, ClangN);
   }
   case 4: {
     // Check for a CFString literal of the form CFSTR("string").
@@ -364,6 +614,7 @@ static ValueDecl *importMacro(ClangImporter::Implementation &impl,
       return importStringLiteral(impl, DC, macro, name, tokenI[2],
                                  MappedStringLiteralKind::CFString, ClangN);
     }
+    // FIXME: Handle BIT_MASK(pos) helper macros which expand to a constant?
     break;
   }
   case 5:
@@ -393,10 +644,25 @@ ValueDecl *ClangImporter::Implementation::importMacro(Identifier name,
   if (!macro)
     return nullptr;
 
-  // Look for the value for an already-imported macro.
-  auto known = ImportedMacros.find(macro);
+  // Look for macros imported with the same name.
+  auto known = ImportedMacros.find(name);
   if (known != ImportedMacros.end()) {
-    return known->second;
+    // Check whether this macro has already been imported.
+    for (const auto &entry : known->second) {
+      if (entry.first == macro) return entry.second;
+    }
+
+    // Otherwise, check whether this macro is identical to a macro that has
+    // already been imported.
+    auto &clangPP = getClangPreprocessor();
+    for (const auto &entry : known->second) {
+      // If the macro is equal to an existing macro, map down to the same
+      // declaration.
+      if (macro->isIdenticalTo(*entry.first, clangPP, true)) {
+        known->second.push_back({macro, entry.second});
+        return entry.second;
+      }
+    }
   }
 
   ImportingEntityRAII ImportingEntity(*this);
@@ -407,7 +673,7 @@ ValueDecl *ClangImporter::Implementation::importMacro(Identifier name,
   if (!DC)
     return nullptr;
 
-  auto valueDecl = ::importMacro(*this, DC, name, macro, macro);
-  ImportedMacros[macro] = valueDecl;
+  auto valueDecl = ::importMacro(*this, DC, name, macro, macro, /*castType*/{});
+  ImportedMacros[name].push_back({macro, valueDecl});
   return valueDecl;
 }

@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 // REQUIRES: objc_interop
@@ -14,7 +14,7 @@ protocol Fooable {
   func foo()
 }
 
-func fooify<T>(x: T) {
+func fooify<T>(_ x: T) {
   if let foo = x as? Fooable {
     foo.foo()
   } else {

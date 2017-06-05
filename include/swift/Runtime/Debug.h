@@ -1,12 +1,12 @@
-//===--- Debug.h - Swift Runtime debug helpers ----------------------------===//
+//===--- Debug.h - Swift Runtime debug helpers ------------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,11 +18,12 @@
 #define _SWIFT_RUNTIME_DEBUG_HELPERS_
 
 #include <llvm/Support/Compiler.h>
+#include <stdint.h>
+#include "swift/Runtime/Config.h"
+#include "swift/Runtime/Unreachable.h"
 
 #ifdef SWIFT_HAVE_CRASHREPORTERCLIENT
-#include <stdint.h>
 
-#define CRASH_REPORTER_CLIENT_HIDDEN __attribute__((visibility("hidden")))
 #define CRASHREPORTER_ANNOTATIONS_VERSION 5
 #define CRASHREPORTER_ANNOTATIONS_SECTION "__crash_info"
 
@@ -38,7 +39,7 @@ struct crashreporter_annotations_t {
 };
 
 extern "C" {
-CRASH_REPORTER_CLIENT_HIDDEN
+LLVM_LIBRARY_VISIBILITY
 extern struct crashreporter_annotations_t gCRAnnotations;
 }
 
@@ -61,6 +62,12 @@ static void CRSetCrashLogMessage(const char *) {}
 
 namespace swift {
 
+// Duplicated from Metadata.h. We want to use this header
+// in places that cannot themselves include Metadata.h.
+struct InProcess;
+template <typename Runtime> struct TargetMetadata;
+using Metadata = TargetMetadata<InProcess>;
+
 // swift::crash() halts with a crash log message, 
 // but otherwise tries not to disturb register state.
 
@@ -68,29 +75,34 @@ LLVM_ATTRIBUTE_NORETURN
 LLVM_ATTRIBUTE_ALWAYS_INLINE // Minimize trashed registers
 static inline void crash(const char *message) {
   CRSetCrashLogMessage(message);
-  // __builtin_trap() doesn't always do the right thing due to GCC compatibility
-#if defined(__i386__) || defined(__x86_64__)
-  asm("int3");
-#else
-  __builtin_trap();
-#endif
-  __builtin_unreachable();
+
+  LLVM_BUILTIN_TRAP;
+  swift_runtime_unreachable("Expected compiler to crash.");
+}
+
+/// Report a corrupted type object.
+LLVM_ATTRIBUTE_NORETURN
+LLVM_ATTRIBUTE_ALWAYS_INLINE // Minimize trashed registers
+static inline void _failCorruptType(const Metadata *type) {
+  swift::crash("Corrupt Swift type object");
 }
 
 // swift::fatalError() halts with a crash log message, 
 // but makes no attempt to preserve register state.
 LLVM_ATTRIBUTE_NORETURN
 extern void
-fatalError(const char *format, ...);
+fatalError(uint32_t flags, const char *format, ...);
 
-struct Metadata;
+/// swift::warning() emits a warning from the runtime.
+extern void
+warning(uint32_t flags, const char *format, ...);
 
 // swift_dynamicCastFailure halts using fatalError()
 // with a description of a failed cast's types.
 LLVM_ATTRIBUTE_NORETURN
 void
-swift_dynamicCastFailure(const swift::Metadata *sourceType,
-                         const swift::Metadata *targetType, 
+swift_dynamicCastFailure(const Metadata *sourceType,
+                         const Metadata *targetType,
                          const char *message = nullptr);
 
 // swift_dynamicCastFailure halts using fatalError()
@@ -101,7 +113,28 @@ swift_dynamicCastFailure(const void *sourceType, const char *sourceName,
                          const void *targetType, const char *targetName, 
                          const char *message = nullptr);
 
+SWIFT_RUNTIME_EXPORT
+void swift_reportError(uint32_t flags, const char *message);
+
+// Halt due to an overflow in swift_retain().
+LLVM_ATTRIBUTE_NORETURN LLVM_ATTRIBUTE_NOINLINE
+void swift_abortRetainOverflow();
+
+// Halt due to reading an unowned reference to a dead object.
+LLVM_ATTRIBUTE_NORETURN LLVM_ATTRIBUTE_NOINLINE
+void swift_abortRetainUnowned(const void *object);
+
+/// This function dumps one line of a stack trace. It is assumed that \p framePC
+/// is the address of the stack frame at index \p index. If \p shortOutput is
+/// true, this functions prints only the name of the symbol and offset, ignores
+/// \p index argument and omits the newline.
+void dumpStackTraceEntry(unsigned index, void *framePC,
+                         bool shortOutput = false);
+
+LLVM_ATTRIBUTE_NOINLINE
+void printCurrentBacktrace(unsigned framesToSkip = 1);
+
 // namespace swift
-};
+}
 
 #endif // _SWIFT_RUNTIME_DEBUG_HELPERS_

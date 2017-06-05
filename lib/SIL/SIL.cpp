@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,28 +19,14 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/AnyFunctionRef.h"
 #include "swift/AST/Decl.h"
-#include "swift/AST/Expr.h"
-#include "swift/AST/Mangle.h"
 #include "swift/AST/Pattern.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/ClangImporter/ClangModule.h"
-#include "swift/Basic/Fallthrough.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
+
 using namespace swift;
-
-void ValueBase::replaceAllUsesWith(ValueBase *RHS) {
-  assert(this != RHS && "Cannot RAUW a value with itself");
-  assert(getNumTypes() == RHS->getNumTypes() &&
-         "An instruction and the value base that it is being replaced by "
-         "must have the same number of types");
-
-  while (!use_empty()) {
-    Operand *Op = *use_begin();
-    Op->set(SILValue(RHS, Op->get().getResultNumber()));
-  }
-}
-
 
 SILUndef *SILUndef::get(SILType Ty, SILModule *M) {
   // Unique these.
@@ -48,18 +34,6 @@ SILUndef *SILUndef::get(SILType Ty, SILModule *M) {
   if (Entry == nullptr)
     Entry = new (*M) SILUndef(Ty);
   return Entry;
-}
-
-static FormalLinkage
-getGenericClauseLinkage(ArrayRef<GenericTypeParamDecl *> params) {
-  FormalLinkage result = FormalLinkage::Top;
-  for (auto &param : params) {
-    for (auto proto : param->getConformingProtocols(nullptr))
-      result ^= getTypeLinkage(CanType(proto->getDeclaredType()));
-    if (auto superclass = param->getSuperclass())
-      result ^= getTypeLinkage(superclass->getCanonicalType());
-  }
-  return result;
 }
 
 FormalLinkage swift::getDeclLinkage(const ValueDecl *D) {
@@ -77,17 +51,23 @@ FormalLinkage swift::getDeclLinkage(const ValueDecl *D) {
 
   switch (D->getEffectiveAccess()) {
   case Accessibility::Public:
+  case Accessibility::Open:
     return FormalLinkage::PublicUnique;
   case Accessibility::Internal:
-    // FIXME: This ought to be "hidden" as well, but that causes problems when
-    // inlining code from the standard library, which may reference internal
-    // declarations.
-    return FormalLinkage::PublicUnique;
+    // If we're serializing all function bodies, type metadata for internal
+    // types needs to be public too.
+    if (D->getDeclContext()->getParentModule()->getResilienceStrategy()
+        == ResilienceStrategy::Fragile)
+      return FormalLinkage::PublicUnique;
+    return FormalLinkage::HiddenUnique;
+  case Accessibility::FilePrivate:
   case Accessibility::Private:
     // Why "hidden" instead of "private"? Because the debugger may need to
     // access these symbols.
     return FormalLinkage::HiddenUnique;
   }
+
+  llvm_unreachable("Unhandled Accessibility in switch.");
 }
 
 FormalLinkage swift::getTypeLinkage(CanType type) {
@@ -98,15 +78,8 @@ FormalLinkage swift::getTypeLinkage(CanType type) {
     CanType type = CanType(_type);
 
     // For any nominal type reference, look at the type declaration.
-    if (auto nominal = type->getAnyNominal()) {
+    if (auto nominal = type->getAnyNominal())
       result ^= getDeclLinkage(nominal);
-
-    // For polymorphic function types, look at the generic parameters.
-    // FIXME: findIf should do this, once polymorphic function types can be
-    // canonicalized and re-formed properly.
-    } else if (auto polyFn = dyn_cast<PolymorphicFunctionType>(type)) {
-      result ^= getGenericClauseLinkage(polyFn->getGenericParameters());
-    }
 
     return false; // continue searching
   });
@@ -135,4 +108,36 @@ SILLinkage swift::getSILLinkage(FormalLinkage linkage,
     return SILLinkage::Private;
   }
   llvm_unreachable("bad formal linkage");
+}
+
+SILLinkage
+swift::getLinkageForProtocolConformance(const NormalProtocolConformance *C,
+                                        ForDefinition_t definition) {
+  // Behavior conformances are always private.
+  if (C->isBehaviorConformance())
+    return (definition ? SILLinkage::Private : SILLinkage::PrivateExternal);
+
+  ModuleDecl *conformanceModule = C->getDeclContext()->getParentModule();
+
+  // If the conformance was synthesized by the ClangImporter, give it
+  // shared linkage.
+  auto typeDecl = C->getType()->getNominalOrBoundGenericNominal();
+  auto typeUnit = typeDecl->getModuleScopeContext();
+  if (isa<ClangModuleUnit>(typeUnit)
+      && conformanceModule == typeUnit->getParentModule())
+    return SILLinkage::Shared;
+
+  Accessibility accessibility = std::min(C->getProtocol()->getEffectiveAccess(),
+                                         typeDecl->getEffectiveAccess());
+  switch (accessibility) {
+    case Accessibility::Private:
+    case Accessibility::FilePrivate:
+      return (definition ? SILLinkage::Private : SILLinkage::PrivateExternal);
+
+    case Accessibility::Internal:
+      return (definition ? SILLinkage::Hidden : SILLinkage::HiddenExternal);
+
+    default:
+      return (definition ? SILLinkage::Public : SILLinkage::PublicExternal);
+  }
 }

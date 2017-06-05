@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -37,7 +37,32 @@ namespace swift {
 /// UnqualifiedLookupResult - One result of unqualified lookup.
 struct UnqualifiedLookupResult {
 private:
+
+  /// The declaration through where we find Value. For instance,
+  ///
+  /// class BaseClass {
+  ///   func foo() {}
+  /// }
+  ///
+  /// class DerivedClass : BaseClass {
+  ///   func bar() {}
+  /// }
+  ///
+  /// When finding foo() from the body of DerivedClass, Base is DerivedClass.
+  ///
+  /// Another example:
+  ///
+  /// class BaseClass {
+  ///   func bar() {}
+  ///   func foo() {}
+  /// }
+  ///
+  /// When finding bar() from the function body of foo(), Base is the implicit
+  /// self parameter in foo().
   ValueDecl *Base;
+
+  /// The declaration corresponds to the given name; i.e. the decl we are
+  /// looking up.
   ValueDecl *Value;
 
 public:
@@ -68,7 +93,8 @@ public:
                     bool IsKnownPrivate = false,
                     SourceLoc Loc = SourceLoc(),
                     bool IsTypeLookup = false,
-                    bool AllowProtocolMembers = false);
+                    bool AllowProtocolMembers = false,
+                    bool IgnoreAccessControl = false);
 
   SmallVector<UnqualifiedLookupResult, 4> Results;
 
@@ -140,7 +166,7 @@ enum class DeclVisibilityKind {
   MemberOfOutsideNominal,
 
   /// Declaration is visible at the top level because it is declared in this
-  /// module or in a imported module.
+  /// module or in an imported module.
   VisibleAtTopLevel,
 
   /// Declaration was found via \c AnyObject or \c AnyObject.Type.
@@ -157,6 +183,22 @@ public:
   /// This method is called by findVisibleDecls() every time it finds a decl.
   virtual void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason) = 0;
 };
+
+/// An implementation of VisibleDeclConsumer that's built from a lambda.
+template <class Fn>
+class LambdaDeclConsumer : public VisibleDeclConsumer {
+  Fn Callback;
+public:
+  LambdaDeclConsumer(Fn &&callback) : Callback(std::move(callback)) {}
+
+  void foundDecl(ValueDecl *VD, DeclVisibilityKind reason) {
+    Callback(VD, reason);
+  }
+};
+template <class Fn>
+LambdaDeclConsumer<Fn> makeDeclConsumer(Fn &&callback) {
+  return LambdaDeclConsumer<Fn>(std::move(callback));
+}
 
 /// A consumer that inserts found decls into an externally-owned SmallVector.
 class VectorDeclConsumer : public VisibleDeclConsumer {
@@ -178,11 +220,18 @@ class NamedDeclConsumer : public VisibleDeclConsumer {
 public:
   DeclName name;
   SmallVectorImpl<UnqualifiedLookupResult> &results;
+  bool isTypeLookup;
+
   NamedDeclConsumer(DeclName name,
-                    SmallVectorImpl<UnqualifiedLookupResult> &results)
-    : name(name), results(results) {}
+                    SmallVectorImpl<UnqualifiedLookupResult> &results,
+                    bool isTypeLookup)
+    : name(name), results(results), isTypeLookup(isTypeLookup) {}
 
   virtual void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason) override {
+    // Give clients an opportunity to filter out non-type declarations early,
+    // to avoid circular validation.
+    if (isTypeLookup && !isa<TypeDecl>(VD))
+      return;
     if (VD->getFullName().matchesRef(name))
       results.push_back(UnqualifiedLookupResult(VD));
   }
@@ -218,7 +267,7 @@ bool removeOverriddenDecls(SmallVectorImpl<ValueDecl*> &decls);
 ///
 /// \returns true if any shadowed declarations were removed.
 bool removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
-                         const Module *curModule,
+                         const ModuleDecl *curModule,
                          LazyResolver *typeResolver);
 
 /// Finds decls visible in the given context and feeds them to the given
@@ -238,7 +287,8 @@ void lookupVisibleDecls(VisibleDeclConsumer &Consumer,
 void lookupVisibleMemberDecls(VisibleDeclConsumer &Consumer,
                               Type BaseTy,
                               const DeclContext *CurrDC,
-                              LazyResolver *typeResolver);
+                              LazyResolver *typeResolver,
+                              bool includeInstanceMembers);
 
 namespace namelookup {
 enum class ResolutionKind {
@@ -270,12 +320,12 @@ enum class ResolutionKind {
 ///        being performed, for checking accessibility. This must be either a
 ///        FileUnit or a Module.
 /// \param extraImports Private imports to include in this search.
-void lookupInModule(Module *module, Module::AccessPathTy accessPath,
+void lookupInModule(ModuleDecl *module, ModuleDecl::AccessPathTy accessPath,
                     DeclName name, SmallVectorImpl<ValueDecl *> &decls,
                     NLKind lookupKind, ResolutionKind resolutionKind,
                     LazyResolver *typeResolver,
                     const DeclContext *moduleScopeContext,
-                    ArrayRef<Module::ImportedModule> extraImports = {});
+                    ArrayRef<ModuleDecl::ImportedModule> extraImports = {});
 
 } // end namespace namelookup
 } // end namespace swift

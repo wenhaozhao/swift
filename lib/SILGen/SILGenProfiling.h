@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,6 +16,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "swift/AST/ASTNode.h"
 #include "swift/AST/Stmt.h"
+#include "swift/SIL/FormalLinkage.h"
 
 namespace swift {
 
@@ -26,12 +27,7 @@ namespace Lowering {
 class SILGenModule;
 class SILGenBuilder;
 
-/// RAII object to set up profiling for a function.
-struct ProfilerRAII {
-  SILGenModule &SGM;
-  ProfilerRAII(SILGenModule &SGM, AbstractFunctionDecl *D);
-  ~ProfilerRAII();
-};
+struct ProfilerRAII;
 
 /// Profiling state.
 class SILGenProfiling {
@@ -41,6 +37,8 @@ private:
 
   // The current function's name and counter data.
   std::string CurrentFuncName;
+  StringRef CurrentFileName;
+  FormalLinkage CurrentFuncLinkage;
   unsigned NumRegionCounters;
   uint64_t FunctionHash;
   llvm::DenseMap<ASTNode, unsigned> RegionCounterMap;
@@ -54,11 +52,23 @@ public:
 
   bool hasRegionCounters() const { return NumRegionCounters != 0; }
 
-  /// Map counters to ASTNodes and set them up for profiling the given function.
-  void assignRegionCounters(AbstractFunctionDecl *Root);
-
   /// Emit SIL to increment the counter for \c Node.
   void emitCounterIncrement(SILGenBuilder &Builder, ASTNode Node);
+
+private:
+  /// Map counters to ASTNodes and set them up for profiling the given function.
+  void assignRegionCounters(Decl *Root);
+
+  friend struct ProfilerRAII;
+};
+
+/// RAII object to set up profiling for a function.
+struct ProfilerRAII {
+  SILGenModule &SGM;
+  std::unique_ptr<SILGenProfiling> PreviousProfiler;
+
+  ProfilerRAII(SILGenModule &SGM, Decl *D);
+  ~ProfilerRAII();
 };
 
 } // end namespace Lowering

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -34,13 +34,17 @@ namespace llvm {
 }
 
 namespace swift {
+  enum IsTake_t : bool;
+  class SILType;
+
 namespace irgen {
   class Address;
-  class ContainedAddress;
+  class StackAddress;
   class IRGenFunction;
   class IRGenModule;
   class Explosion;
   class ExplosionSchema;
+  class NativeConventionSchema;
   enum OnHeap_t : unsigned char;
   class OwnedAddress;
   class RValue;
@@ -56,52 +60,6 @@ enum class FixedPacking {
   
   /// It needs to be checked dynamically.
   Dynamic
-};
-
-/// The kind of reference counting implementation a heap object uses.
-enum class ReferenceCounting : unsigned char {
-  /// The object uses native Swift reference counting.
-  Native,
-  
-  /// The object uses ObjC reference counting.
-  ///
-  /// When ObjC interop is enabled, native Swift class objects are also ObjC
-  /// reference counting compatible. Swift non-class heap objects are never
-  /// ObjC reference counting compatible.
-  ///
-  /// Blocks are always ObjC reference counting compatible.
-  ObjC,
-  
-  /// The object uses _Block_copy/_Block_release reference counting.
-  ///
-  /// This is a strict subset of ObjC; all blocks are also ObjC reference
-  /// counting compatible. The block is assumed to have already been moved to
-  /// the heap so that _Block_copy returns the same object back.
-  Block,
-  
-  /// The object has an unknown reference counting implementation.
-  ///
-  /// This uses maximally-compatible reference counting entry points in the
-  /// runtime.
-  ///
-  /// FIXME: Those entry points are currently objc_retain/objc_release, which
-  /// are not compatible with non-class heap objects.
-  Unknown,
-  
-  /// Cases prior to this one are binary-compatible with Unknown reference
-  /// counting.
-  LastUnknownCompatible = Unknown,
-
-  /// The object has an unknown reference counting implementation and
-  /// the reference value may contain extra bits that need to be masked.
-  ///
-  /// This uses maximally-compatible reference counting entry points in the
-  /// runtime, with a masking layer on top. A bit inside the pointer is used
-  /// to signal native Swift refcounting.
-  Bridge,
-  
-  /// The object uses ErrorType's reference counting entry points.
-  Error,
 };
   
 /// Information about the IR representation and generation of the
@@ -126,14 +84,14 @@ protected:
     /// Everything after this is loadable.
     STIK_Loadable,
     STIK_Reference,
-    STIK_Unowned,
   };
 
   TypeInfo(llvm::Type *Type, Alignment A, IsPOD_t pod,
            IsBitwiseTakable_t bitwiseTakable,
            IsFixedSize_t alwaysFixedSize,
            SpecialTypeInfoKind stik)
-    : NextConverted(0), StorageType(Type), StorageAlignment(A),
+    : NextConverted(0), StorageType(Type), nativeReturnSchema(nullptr),
+      nativeParameterSchema(nullptr), StorageAlignment(A),
       POD(pod), BitwiseTakable(bitwiseTakable),
       AlwaysFixedSize(alwaysFixedSize), STIK(stik),
       SubclassKind(InvalidSubclassKind) {
@@ -146,7 +104,7 @@ protected:
   }
 
 public:
-  virtual ~TypeInfo() = default;
+  virtual ~TypeInfo();
 
   /// Unsafely cast this to the given subtype.
   template <class T> const T &as() const {
@@ -154,11 +112,14 @@ public:
     return static_cast<const T &>(*this);
   }
 
+private:
   /// The LLVM representation of a stored value of this type.  For
   /// non-fixed types, this is really useful only for forming pointers to it.
   llvm::Type *StorageType;
 
-private:
+  mutable NativeConventionSchema *nativeReturnSchema;
+  mutable NativeConventionSchema *nativeParameterSchema;
+
   /// The storage alignment of this type in bytes.  This is never zero
   /// for a completely-converted type.
   Alignment StorageAlignment;
@@ -194,15 +155,15 @@ public:
   bool isComplete() const { return !StorageAlignment.isZero(); }
 
   /// Whether this type is known to be empty.
-  bool isKnownEmpty() const;
+  bool isKnownEmpty(ResilienceExpansion expansion) const;
 
   /// Whether this type is known to be POD, i.e. to not require any
   /// particular action on copy or destroy.
-  IsPOD_t isPOD(ResilienceScope scope) const { return IsPOD_t(POD); }
+  IsPOD_t isPOD(ResilienceExpansion expansion) const { return IsPOD_t(POD); }
   
   /// Whether this type is known to be bitwise-takable, i.e. "initializeWithTake"
   /// is equivalent to a memcpy.
-  IsBitwiseTakable_t isBitwiseTakable(ResilienceScope scope) const {
+  IsBitwiseTakable_t isBitwiseTakable(ResilienceExpansion expansion) const {
     return IsBitwiseTakable_t(BitwiseTakable);
   }
   
@@ -235,17 +196,19 @@ public:
 
   /// Whether this type is known to be fixed-size in the given
   /// resilience domain.  If true, spare bits can be used.
-  IsFixedSize_t isFixedSize(ResilienceScope scope) const {
-    switch (scope) {
-    case ResilienceScope::Component:
+  IsFixedSize_t isFixedSize(ResilienceExpansion expansion) const {
+    switch (expansion) {
+    case ResilienceExpansion::Maximal:
       return isFixedSize();
-    case ResilienceScope::Universal:
+    case ResilienceExpansion::Minimal:
       // We can't be universally fixed size if we're not locally
       // fixed size.
       assert((isFixedSize() || AlwaysFixedSize == IsNotFixedSize) &&
              "IsFixedSize vs IsAlwaysFixedSize mismatch");
       return IsFixedSize_t(AlwaysFixedSize);
     }
+
+    llvm_unreachable("Not a valid ResilienceExpansion.");
   }
 
   /// Whether this type is known to be loadable in the local
@@ -299,13 +262,24 @@ public:
   ExplosionSchema getSchema() const;
 
   /// Allocate a variable of this type on the stack.
-  virtual ContainedAddress allocateStack(IRGenFunction &IGF,
-                                         SILType T,
-                                         const llvm::Twine &name) const = 0;
+  virtual StackAddress allocateStack(IRGenFunction &IGF, SILType T,
+                                     bool isInEntryBlock,
+                                     const llvm::Twine &name) const = 0;
 
   /// Deallocate a variable of this type.
-  virtual void deallocateStack(IRGenFunction &IGF, Address addr,
+  virtual void deallocateStack(IRGenFunction &IGF, StackAddress addr,
                                SILType T) const = 0;
+
+  /// Destroy the value of a variable of this type, then deallocate its
+  /// memory.
+  virtual void destroyStack(IRGenFunction &IGF, StackAddress addr,
+                            SILType T) const = 0;
+
+  /// Copy or take a value out of one address and into another, destroying
+  /// old value in the destination.  Equivalent to either assignWithCopy
+  /// or assignWithTake depending on the value of isTake.
+  void assign(IRGenFunction &IGF, Address dest, Address src, IsTake_t isTake,
+              SILType T) const;
 
   /// Copy a value out of an object and into another, destroying the
   /// old value in the destination.
@@ -317,6 +291,13 @@ public:
   virtual void assignWithTake(IRGenFunction &IGF, Address dest,
                               Address src, SILType T) const = 0;
 
+  /// Copy-initialize or take-initialize an uninitialized object
+  /// with the value from a different object.  Equivalent to either
+  /// initializeWithCopy or initializeWithTake depending on the value
+  /// of isTake.
+  void initialize(IRGenFunction &IGF, Address dest, Address src,
+                  IsTake_t isTake, SILType T) const;
+
   /// Perform a "take-initialization" from the given object.  A
   /// take-initialization is like a C++ move-initialization, except that
   /// the old object is actually no longer permitted to be destroyed.
@@ -327,35 +308,36 @@ public:
   virtual void initializeWithCopy(IRGenFunction &IGF, Address destAddr,
                                   Address srcAddr, SILType T) const = 0;
 
-  /// Perform a "take-initialization" from the given object into an
-  /// uninitialized fixed-size buffer, allocating the buffer if necessary.
-  /// Returns the address of the value inside the buffer.
+  /// Perform a copy-initialization from the given fixed-size buffer
+  /// into an uninitialized fixed-size buffer, allocating the buffer if
+  /// necessary.  Returns the address of the value inside the buffer.
   ///
   /// This is equivalent to:
-  ///   auto destAddress = allocateBuffer(IGF, destBuffer, T);
-  ///   initializeWithTake(IGF, destAddr, srcAddr, T);
-  ///   return destAddress;
+  ///   auto srcAddress = projectBuffer(IGF, srcBuffer, T);
+  ///   initializeBufferWithCopy(IGF, destBuffer, srcAddress, T);
   /// but will be more efficient for dynamic types, since it uses a single
   /// value witness call.
-  virtual Address initializeBufferWithTake(IRGenFunction &IGF,
-                                           Address destBuffer,
-                                           Address srcAddr,
-                                           SILType T) const;
+  virtual Address initializeBufferWithCopyOfBuffer(IRGenFunction &IGF,
+                                                   Address destBuffer,
+                                                   Address srcBuffer,
+                                                   SILType T) const;
 
-  /// Perform a copy-initialization from the given object into an
-  /// uninitialized fixed-size buffer, allocating the buffer if necessary.
-  /// Returns the address of the value inside the buffer.
+  /// Perform a take-initialization from the given fixed-size buffer
+  /// into an uninitialized fixed-size buffer, allocating the buffer if
+  /// necessary and deallocating the destination buffer.  Returns the
+  /// address of the value inside the destination buffer.
   ///
   /// This is equivalent to:
-  ///   auto destAddress = allocateBuffer(IGF, destBuffer, T);
-  ///   initializeWithCopy(IGF, destAddr, srcAddr, T);
-  ///   return destAddress;
-  /// but will be more efficient for dynamic types, since it uses a single
+  ///   auto srcAddress = projectBuffer(IGF, srcBuffer, T);
+  ///   initializeBufferWithTake(IGF, destBuffer, srcAddress, T);
+  ///   deallocateBuffer(IGF, srcBuffer, T);
+  /// but may be able to re-use the buffer from the source buffer, and may
+  /// be more efficient for dynamic types, since it uses a single
   /// value witness call.
-  virtual Address initializeBufferWithCopy(IRGenFunction &IGF,
-                                           Address destBuffer,
-                                           Address srcAddr,
-                                           SILType T) const;
+  virtual Address initializeBufferWithTakeOfBuffer(IRGenFunction &IGF,
+                                                   Address destBuffer,
+                                                   Address srcBuffer,
+                                                   SILType T) const;
 
   /// Take-initialize an address from a parameter explosion.
   virtual void initializeFromParams(IRGenFunction &IGF, Explosion &params,
@@ -363,12 +345,12 @@ public:
 
   /// Destroy an object of this type in memory.
   virtual void destroy(IRGenFunction &IGF, Address address, SILType T) const = 0;
-  
+
   /// Should optimizations be enabled which rely on the representation
   /// for this type being a single object pointer?
   ///
   /// \return false by default
-  virtual bool isSingleRetainablePointer(ResilienceScope scope,
+  virtual bool isSingleRetainablePointer(ResilienceExpansion expansion,
                                          ReferenceCounting *refcounting
                                              = nullptr) const;
 
@@ -376,9 +358,9 @@ public:
   /// for this type being a single Swift-retainable object pointer?
   ///
   /// \return false by default
-  bool isSingleSwiftRetainablePointer(ResilienceScope scope) const {
+  bool isSingleSwiftRetainablePointer(ResilienceExpansion expansion) const {
     ReferenceCounting refcounting;
-    return (isSingleRetainablePointer(scope, &refcounting) &&
+    return (isSingleRetainablePointer(expansion, &refcounting) &&
             refcounting == ReferenceCounting::Native);
   }
 
@@ -418,7 +400,11 @@ public:
   /// Index into an array of objects of this type.
   Address indexArray(IRGenFunction &IGF, Address base, llvm::Value *offset,
                      SILType T) const;
-  
+
+  /// Round up the address value \p base to the alignment of type \p T. 
+  Address roundUpToTypeAlignment(IRGenFunction &IGF, Address base,
+                                 SILType T) const;
+
   /// Destroy an array of objects of this type in memory.
   virtual void destroyArray(IRGenFunction &IGF, Address base,
                             llvm::Value *count, SILType T) const;
@@ -445,6 +431,12 @@ public:
   virtual void initializeArrayWithTakeBackToFront(IRGenFunction &IGF,
                                        Address dest, Address src,
                                        llvm::Value *count, SILType T) const;
+
+  /// Get the native (abi) convention for a return value of this type.
+  const NativeConventionSchema &nativeReturnValueSchema(IRGenModule &IGM) const;
+
+  /// Get the native (abi) convention for a parameter value of this type.
+  const NativeConventionSchema &nativeParameterValueSchema(IRGenModule &IGM) const;
 };
 
 } // end namespace irgen

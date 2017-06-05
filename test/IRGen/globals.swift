@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -primary-file %s -emit-ir | FileCheck %s
+// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -primary-file %s -emit-ir | %FileCheck %s
 
 // REQUIRES: CPU=x86_64
 
@@ -8,7 +8,7 @@ var g2 : (Void, Int, Int)
 var g3 : Bool
 
 // FIXME: enum IRgen
-// enum TY4 { case Some(Int, Int); case None }
+// enum TY4 { case some(Int, Int); case none }
 // var g4 : TY4
 
 // FIXME: enum IRgen
@@ -40,20 +40,20 @@ extension A {
 // CHECK-NOT: TY8
 // CHECK-NOT: TY9
 
-// CHECK: @_Tv7globals2g0Si = global [[INT]] zeroinitializer, align 8
-// CHECK: @_Tv7globals2g1TT_SiT__ = global <{ [[INT]] }> zeroinitializer, align 8
-// CHECK: @_Tv7globals2g2TT_SiSi_ = global <{ [[INT]], [[INT]] }> zeroinitializer, align 8
-// CHECK: @_Tv7globals2g3Sb = global [[BOOL]] zeroinitializer, align 1
-// CHECK: @_Tv7globals2g6Sd = global [[DOUBLE]] zeroinitializer, align 8
-// CHECK: @_Tv7globals2g7Sf = global [[FLOAT]] zeroinitializer, align 4
-// CHECK: @_TZvV7globals1A3fooSi = global [[INT]] zeroinitializer, align 8
+// CHECK: @_T07globals2g0Siv = hidden global [[INT]] zeroinitializer, align 8
+// CHECK: @_T07globals2g1yt_Siyttv = hidden global <{ [[INT]] }> zeroinitializer, align 8
+// CHECK: @_T07globals2g2yt_S2itv = hidden global <{ [[INT]], [[INT]] }> zeroinitializer, align 8
+// CHECK: @_T07globals2g3Sbv = hidden global [[BOOL]] zeroinitializer, align 1
+// CHECK: @_T07globals2g6Sdv = hidden global [[DOUBLE]] zeroinitializer, align 8
+// CHECK: @_T07globals2g7Sfv = hidden global [[FLOAT]] zeroinitializer, align 4
+// CHECK: @_T07globals1AV3fooSivZ = hidden global [[INT]] zeroinitializer, align 8
 
 // CHECK-NOT: g8
 // CHECK-NOT: g9
 
-// CHECK: define i32 @main(i32, i8**) {{.*}} {
-// CHECK:      store  i64 {{.*}}, i64* getelementptr inbounds ([[INT]], [[INT]]* @_Tv7globals2g0Si, i32 0, i32 0), align 8
+// CHECK: define{{( protected)?}} i32 @main(i32, i8**) {{.*}} {
+// CHECK:      store  i64 {{.*}}, i64* getelementptr inbounds ([[INT]], [[INT]]* @_T07globals2g0Siv, i32 0, i32 0), align 8
 
 // FIXME: give these initializers a real mangled name
-// CHECK: define internal void @globalinit_{{.*}}func0() {{.*}} {
-// CHECK:      store i64 5, i64* getelementptr inbounds (%Si, %Si* @_TZvV7globals1A3fooSi, i32 0, i32 0), align 8
+// CHECK: define internal swiftcc void @globalinit_{{.*}}func0() {{.*}} {
+// CHECK:      store i64 5, i64* getelementptr inbounds (%TSi, %TSi* @_T07globals1AV3fooSivZ, i32 0, i32 0), align 8

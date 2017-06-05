@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,6 +14,7 @@
 #define SWIFT_FRONTEND_FRONTENDOPTIONS_H
 
 #include "swift/AST/Module.h"
+#include "llvm/ADT/Hashing.h"
 
 #include <string>
 #include <vector>
@@ -112,8 +113,11 @@ public:
   /// The path to which we should output a Swift reference dependencies file.
   std::string ReferenceDependenciesFilePath;
 
-  /// The path to which we should output a fixits as source edits.
+  /// The path to which we should output fixits as source edits.
   std::string FixitsOutputPath;
+
+  /// The path to which we should output a loaded module trace file.
+  std::string LoadedModuleTracePath;
 
   /// Arguments which should be passed in immediate mode.
   std::vector<std::string> ImmediateArgv;
@@ -125,16 +129,33 @@ public:
   /// The path to output swift interface files for the compiled source files.
   std::string DumpAPIPath;
 
+  /// The path to collect the group information for the compiled source files.
+  std::string GroupInfoPath;
+
+  /// If non-zero, warn when a function body takes longer than this many
+  /// milliseconds to type-check.
+  ///
+  /// Intended for debugging purposes only.
+  unsigned WarnLongFunctionBodies = 0;
+
   enum ActionType {
     NoneAction, ///< No specific action
-    Parse, ///< Parse and type-check only
+    Parse, ///< Parse only
+    Typecheck, ///< Parse and type-check only
     DumpParse, ///< Parse only and dump AST
     DumpInterfaceHash, ///< Parse and dump the interface token hash.
     DumpAST, ///< Parse, type-check, and dump AST
     PrintAST, ///< Parse, type-check, and pretty-print AST
 
+    /// Parse and dump scope map.
+    DumpScopeMaps,
+
     /// Parse, type-check, and dump type refinement context hierarchy
     DumpTypeRefinementContexts,
+
+    EmitTBD, ///< Emit a TBD file for this module
+    EmitImportedModules, ///< Emit the modules that this one imports
+    EmitPCH, ///< Emit PCH of imported bridging header
 
     EmitSILGen, ///< Emit raw SIL
     EmitSIL, ///< Emit canonical SIL
@@ -166,9 +187,26 @@ public:
   /// If set, dumps wall time taken to check each function body to llvm::errs().
   bool DebugTimeFunctionBodies = false;
 
+  /// If set, dumps wall time taken to check each expression.
+  bool DebugTimeExpressionTypeChecking = false;
+
+  /// If set, prints the time taken in each major compilation phase to 
+  /// llvm::errs().
+  ///
+  /// \sa swift::SharedTimer
+  bool DebugTimeCompilation = false;
+
+  /// The path to which we should output statistics files.
+  std::string StatsOutputDir;
+
   /// Indicates whether function body parsing should be delayed
   /// until the end of all files.
   bool DelayedFunctionBodyParsing = false;
+
+  /// If true, serialization encodes an extra lookup table for use in module-
+  /// merging when emitting partial modules (the per-file modules in a non-WMO
+  /// build).
+  bool EnableSerializationNestedTypeLookupTable = true;
 
   /// Indicates whether or not an import statement can pick up a Swift source
   /// file (as opposed to a module file).
@@ -176,8 +214,13 @@ public:
 
   /// Indicates whether we are compiling for testing.
   ///
-  /// \see Module::isTestingEnabled
+  /// \see ModuleDecl::isTestingEnabled
   bool EnableTesting = false;
+
+  /// Enables the "fully resilient" resilience strategy.
+  ///
+  /// \see ResilienceStrategy::Resilient
+  bool EnableResilience = false;
 
   /// Indicates that the frontend should emit "verbose" SIL
   /// (if asked to emit SIL).
@@ -191,8 +234,9 @@ public:
   /// by the Clang importer as part of semantic analysis.
   bool SerializeBridgingHeader = false;
 
-  /// Indicates that all generated SIL should be serialized into a module,
-  /// not just code considered fragile.
+  /// Enables the "fully fragile" resilience strategy.
+  ///
+  /// \see ResilienceStrategy::Fragile
   bool SILSerializeAll = false;
 
   /// Indicates whether or not the frontend should print statistics upon
@@ -205,6 +249,13 @@ public:
 
   /// Indicates whether the playground transformation should be applied.
   bool PlaygroundTransform = false;
+  
+  /// Indicates whether the AST should be instrumented to simulate a debugger's
+  /// program counter. Similar to the PlaygroundTransform, this will instrument
+  /// the AST with function calls that get called when you would see a program
+  /// counter move in a debugger. To adopt this implement the
+  /// __builtin_pc_before and __builtin_pc_after functions.
+  bool PCMacro = false;
 
   /// Indicates whether the playground transformation should omit
   /// instrumentation that has a high runtime performance impact.
@@ -220,6 +271,16 @@ public:
   /// variables by name when we print it out. This eases diffing of SIL files.
   bool EmitSortedSIL = false;
 
+  /// The different modes for validating TBD against the LLVM IR.
+  enum class TBDValidationMode {
+    None,           ///< Do no validation.
+    MissingFromTBD, ///< Only check for symbols that are in IR but not TBD.
+    All, ///< Check for symbols that are in IR but not TBD and TBD but not IR.
+  };
+
+  /// Compare the symbols in the IR against the TBD file we would generate.
+  TBDValidationMode ValidateTBDAgainstIR = TBDValidationMode::None;
+
   /// An enum with different modes for automatically crashing at defined times.
   enum class DebugCrashMode {
     None, ///< Don't automatically crash.
@@ -229,6 +290,10 @@ public:
 
   /// Indicates a debug crash mode for the frontend.
   DebugCrashMode CrashMode = DebugCrashMode::None;
+
+  /// Line and column for each of the locations to be probed by
+  /// -dump-scope-maps.
+  SmallVector<std::pair<unsigned, unsigned>, 2> DumpScopeMapLocations;
 
   /// Indicates whether the RequestedAction has output.
   bool actionHasOutput() const;
@@ -250,6 +315,12 @@ public:
   void setSingleOutputFilename(const std::string &FileName) {
     OutputFilenames.clear();
     OutputFilenames.push_back(FileName);
+  }
+
+  /// Return a hash code of any components from these options that should
+  /// contribute to a Swift Bridging PCH hash.
+  llvm::hash_code getPCHHashComponents() const {
+    return llvm::hash_value(0);
   }
 };
 

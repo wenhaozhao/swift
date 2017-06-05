@@ -1,12 +1,12 @@
-//===-- Frontend.cpp - frontend utility methods ---------------------------===//
+//===--- Frontend.cpp - frontend utility methods --------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -27,6 +27,7 @@
 #include "swift/Parse/Lexer.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/CommandLine.h"
@@ -35,11 +36,27 @@
 
 using namespace swift;
 
+std::string CompilerInvocation::getPCHHash() const {
+  using llvm::hash_code;
+  using llvm::hash_value;
+  using llvm::hash_combine;
+
+  auto Code = hash_value(LangOpts.getPCHHashComponents());
+  Code = hash_combine(Code, FrontendOpts.getPCHHashComponents());
+  Code = hash_combine(Code, ClangImporterOpts.getPCHHashComponents());
+  Code = hash_combine(Code, SearchPathOpts.getPCHHashComponents());
+  Code = hash_combine(Code, DiagnosticOpts.getPCHHashComponents());
+  Code = hash_combine(Code, SILOpts.getPCHHashComponents());
+  Code = hash_combine(Code, IRGenOpts.getPCHHashComponents());
+
+  return llvm::APInt(64, Code).toString(36, /*Signed=*/false);
+}
+
 void CompilerInstance::createSILModule(bool WholeModule) {
   assert(MainModule && "main module not created yet");
-  TheSILModule = SILModule::createEmptyModule(getMainModule(),
-                                              Invocation.getSILOptions(),
-                                              WholeModule);
+  TheSILModule = SILModule::createEmptyModule(
+      getMainModule(), Invocation.getSILOptions(), WholeModule,
+      Invocation.getFrontendOptions().SILSerializeAll);
 }
 
 void CompilerInstance::setPrimarySourceFile(SourceFile *SF) {
@@ -69,6 +86,12 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
   if (Invocation.getDiagnosticOptions().ShowDiagnosticsAfterFatalError) {
     Diagnostics.setShowDiagnosticsAfterFatalError();
   }
+  if (Invocation.getDiagnosticOptions().SuppressWarnings) {
+    Diagnostics.setSuppressWarnings(true);
+  }
+  if (Invocation.getDiagnosticOptions().WarningsAsErrors) {
+    Diagnostics.setWarningsAsErrors(true);
+  }
 
   // If we are asked to emit a module documentation file, configure lexing and
   // parsing to remember comments.
@@ -81,7 +104,10 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
 
   if (Invocation.getFrontendOptions().EnableSourceImport) {
     bool immediate = Invocation.getFrontendOptions().actionIsImmediate();
-    Context->addModuleLoader(SourceLoader::create(*Context, !immediate,
+    bool enableResilience = Invocation.getFrontendOptions().EnableResilience;
+    Context->addModuleLoader(SourceLoader::create(*Context,
+                                                  !immediate,
+                                                  enableResilience,
                                                   DepTracker));
   }
   
@@ -94,6 +120,7 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
   // knowledge.
   auto clangImporter =
     ClangImporter::create(*Context, Invocation.getClangImporterOptions(),
+                          Invocation.getPCHHash(),
                           DepTracker);
   if (!clangImporter) {
     Diagnostics.diagnose(SourceLoc(), diag::error_clang_importer_create_fail);
@@ -214,12 +241,17 @@ bool CompilerInstance::setup(const CompilerInvocation &Invok) {
   return false;
 }
 
-Module *CompilerInstance::getMainModule() {
+ModuleDecl *CompilerInstance::getMainModule() {
   if (!MainModule) {
     Identifier ID = Context->getIdentifier(Invocation.getModuleName());
-    MainModule = Module::create(ID, *Context);
+    MainModule = ModuleDecl::create(ID, *Context);
     if (Invocation.getFrontendOptions().EnableTesting)
       MainModule->setTestingEnabled();
+
+    if (Invocation.getFrontendOptions().EnableResilience)
+      MainModule->setResilienceStrategy(ResilienceStrategy::Resilient);
+    else if (Invocation.getFrontendOptions().SILSerializeAll)
+      MainModule->setResilienceStrategy(ResilienceStrategy::Fragile);
   }
   return MainModule;
 }
@@ -227,7 +259,7 @@ Module *CompilerInstance::getMainModule() {
 void CompilerInstance::performSema() {
   const FrontendOptions &options = Invocation.getFrontendOptions();
   const InputFileKind Kind = Invocation.getInputKind();
-  Module *MainModule = getMainModule();
+  ModuleDecl *MainModule = getMainModule();
   Context->LoadedModules[MainModule->getName()] = MainModule;
 
   auto modImpKind = SourceFile::ImplicitModuleImportKind::Stdlib;
@@ -262,6 +294,20 @@ void CompilerInstance::performSema() {
       return;
     }
 
+    const auto &silOptions = Invocation.getSILOptions();
+    if ((silOptions.Optimization <= SILOptions::SILOptMode::None &&
+         (options.RequestedAction == FrontendOptions::EmitObject ||
+          options.RequestedAction == FrontendOptions::Immediate ||
+          options.RequestedAction == FrontendOptions::EmitSIL)) ||
+        (silOptions.Optimization == SILOptions::SILOptMode::None &&
+         options.RequestedAction >= FrontendOptions::EmitSILGen)) {
+      // Implicitly import the SwiftOnoneSupport module in non-optimized
+      // builds. This allows for use of popular specialized functions
+      // from the standard library, which makes the non-optimized builds
+      // execute much faster.
+      Invocation.getFrontendOptions()
+                .ImplicitImportModuleNames.push_back(SWIFT_ONONE_SUPPORT);
+    }
     break;
   }
   }
@@ -269,7 +315,7 @@ void CompilerInstance::performSema() {
   auto clangImporter =
     static_cast<ClangImporter *>(Context->getClangModuleLoader());
 
-  Module *underlying = nullptr;
+  ModuleDecl *underlying = nullptr;
   if (options.ImportUnderlyingModule) {
     underlying = clangImporter->loadModule(SourceLoc(),
                                            std::make_pair(MainModule->getName(),
@@ -280,7 +326,7 @@ void CompilerInstance::performSema() {
     }
   }
 
-  Module *importedHeaderModule = nullptr;
+  ModuleDecl *importedHeaderModule = nullptr;
   StringRef implicitHeaderPath = options.ImplicitObjCHeaderPath;
   if (!implicitHeaderPath.empty()) {
     if (!clangImporter->importBridgingHeader(implicitHeaderPath, MainModule)) {
@@ -289,12 +335,12 @@ void CompilerInstance::performSema() {
     }
   }
 
-  SmallVector<Module *, 4> importModules;
+  SmallVector<ModuleDecl *, 4> importModules;
   if (!options.ImplicitImportModuleNames.empty()) {
     for (auto &ImplicitImportModuleName : options.ImplicitImportModuleNames) {
       if (Lexer::isIdentifier(ImplicitImportModuleName)) {
         auto moduleID = Context->getIdentifier(ImplicitImportModuleName);
-        Module *importModule = Context->getModule(std::make_pair(moduleID,
+        ModuleDecl *importModule = Context->getModule(std::make_pair(moduleID,
                                                                  SourceLoc()));
         if (importModule) {
           importModules.push_back(importModule);
@@ -320,7 +366,7 @@ void CompilerInstance::performSema() {
       return;
 
     using ImportPair =
-        std::pair<Module::ImportedModule, SourceFile::ImportOptions>;
+        std::pair<ModuleDecl::ImportedModule, SourceFile::ImportOptions>;
     SmallVector<ImportPair, 4> additionalImports;
 
     if (underlying)
@@ -402,6 +448,12 @@ void CompilerInstance::performSema() {
     if (BufferID == PrimaryBufferID)
       setPrimarySourceFile(NextInput);
 
+    auto &Diags = NextInput->getASTContext().Diags;
+    auto DidSuppressWarnings = Diags.getSuppressWarnings();
+    auto IsPrimary
+      = PrimaryBufferID == NO_SUCH_BUFFER || BufferID == PrimaryBufferID;
+    Diags.setSuppressWarnings(DidSuppressWarnings || !IsPrimary);
+
     bool Done;
     do {
       // Parser may stop at some erroneous constructions like #else, #endif
@@ -409,6 +461,8 @@ void CompilerInstance::performSema() {
       parseIntoSourceFile(*NextInput, BufferID, &Done, nullptr,
                           &PersistentState, DelayedCB.get());
     } while (!Done);
+
+    Diags.setSuppressWarnings(DidSuppressWarnings);
 
     performNameBinding(*NextInput);
   }
@@ -429,11 +483,14 @@ void CompilerInstance::performSema() {
   if (PrimaryBufferID == NO_SUCH_BUFFER) {
     TypeCheckOptions |= TypeCheckingFlags::DelayWholeModuleChecking;
   }
-  if (Invocation.getFrontendOptions().DebugTimeFunctionBodies) {
+  if (options.DebugTimeFunctionBodies) {
     TypeCheckOptions |= TypeCheckingFlags::DebugTimeFunctionBodies;
   }
-  if (Invocation.getFrontendOptions().actionIsImmediate()) {
+  if (options.actionIsImmediate()) {
     TypeCheckOptions |= TypeCheckingFlags::ForImmediateMode;
+  }
+  if (options.DebugTimeExpressionTypeChecking) {
+    TypeCheckOptions |= TypeCheckingFlags::DebugTimeExpressions;
   }
 
   // Parse the main file last.
@@ -443,6 +500,11 @@ void CompilerInstance::performSema() {
 
     SourceFile &MainFile =
       MainModule->getMainSourceFile(Invocation.getSourceFileKind());
+
+    auto &Diags = MainFile.getASTContext().Diags;
+    auto DidSuppressWarnings = Diags.getSuppressWarnings();
+    Diags.setSuppressWarnings(DidSuppressWarnings || !mainIsPrimary);
+
     SILParserState SILContext(TheSILModule.get());
     unsigned CurTUElem = 0;
     bool Done;
@@ -456,16 +518,27 @@ void CompilerInstance::performSema() {
                           &PersistentState, DelayedCB.get());
       if (mainIsPrimary) {
         performTypeChecking(MainFile, PersistentState.getTopLevelContext(),
-                            TypeCheckOptions, CurTUElem);
+                            TypeCheckOptions, CurTUElem,
+                            options.WarnLongFunctionBodies);
       }
       CurTUElem = MainFile.Decls.size();
     } while (!Done);
+
+    Diags.setSuppressWarnings(DidSuppressWarnings);
     
+    if (mainIsPrimary && !Context->hadError() &&
+        Invocation.getFrontendOptions().PCMacro) {
+      performPCMacro(MainFile, PersistentState.getTopLevelContext());
+    }
+    
+    // Playground transform knows to look out for PCMacro's changes and not
+    // to playground log them.
     if (mainIsPrimary && !Context->hadError() &&
         Invocation.getFrontendOptions().PlaygroundTransform)
       performPlaygroundTransform(MainFile, Invocation.getFrontendOptions().PlaygroundHighPerformance);
-    if (!mainIsPrimary)
+    if (!mainIsPrimary) {
       performNameBinding(MainFile);
+    }
   }
 
   // Type-check each top-level input besides the main source file.
@@ -473,7 +546,8 @@ void CompilerInstance::performSema() {
     if (auto SF = dyn_cast<SourceFile>(File))
       if (PrimaryBufferID == NO_SUCH_BUFFER || SF == PrimarySourceFile)
         performTypeChecking(*SF, PersistentState.getTopLevelContext(),
-                            TypeCheckOptions);
+                            TypeCheckOptions, /*curElem*/0,
+                            options.WarnLongFunctionBodies);
 
   // Even if there were no source files, we should still record known
   // protocols.
@@ -491,35 +565,80 @@ void CompilerInstance::performSema() {
       if (auto SF = dyn_cast<SourceFile>(File))
         performWholeModuleTypeChecking(*SF);
   }
+
+  for (auto File : MainModule->getFiles())
+    if (auto SF = dyn_cast<SourceFile>(File))
+      if (PrimaryBufferID == NO_SUCH_BUFFER || SF == PrimarySourceFile)
+        finishTypeChecking(*SF);
 }
 
 void CompilerInstance::performParseOnly() {
   const InputFileKind Kind = Invocation.getInputKind();
-  Module *MainModule = getMainModule();
+  ModuleDecl *MainModule = getMainModule();
   Context->LoadedModules[MainModule->getName()] = MainModule;
 
-  assert(Kind == InputFileKind::IFK_Swift || Kind == InputFileKind::IFK_Swift_Library);
-  assert(BufferIDs.size() == 1 && "only supports parsing a single file");
+  assert((Kind == InputFileKind::IFK_Swift ||
+          Kind == InputFileKind::IFK_Swift_Library) &&
+         "only supports parsing .swift files");
+  (void)Kind;
 
-  if (Kind == InputFileKind::IFK_Swift)
-    SourceMgr.setHashbangBufferID(BufferIDs[0]);
+  auto modImpKind = SourceFile::ImplicitModuleImportKind::None;
 
-  auto *Input = new (*Context) SourceFile(*MainModule,
-                                          Invocation.getSourceFileKind(),
-                                          BufferIDs[0],
-                                    SourceFile::ImplicitModuleImportKind::None);
-  MainModule->addFile(*Input);
-  setPrimarySourceFile(Input);
+  // Make sure the main file is the first file in the module but parse it last,
+  // to match the parsing logic used when performing Sema.
+  if (MainBufferID != NO_SUCH_BUFFER) {
+    assert(Kind == InputFileKind::IFK_Swift);
+    SourceMgr.setHashbangBufferID(MainBufferID);
+
+    auto *MainFile = new (*Context) SourceFile(
+        *MainModule, Invocation.getSourceFileKind(), MainBufferID, modImpKind);
+    MainModule->addFile(*MainFile);
+
+    if (MainBufferID == PrimaryBufferID)
+      setPrimarySourceFile(MainFile);
+  }
 
   PersistentParserState PersistentState;
-  bool Done;
-  do {
-    // Pump the parser multiple times if necessary.  It will return early
-    // after parsing any top level code in a main module.
-    parseIntoSourceFile(*Input, Input->getBufferID().getValue(), &Done,
-                        nullptr, &PersistentState, nullptr);
-  } while (!Done);
+  // Parse all the library files.
+  for (auto BufferID : BufferIDs) {
+    if (BufferID == MainBufferID)
+      continue;
+
+    auto *NextInput = new (*Context)
+        SourceFile(*MainModule, SourceFileKind::Library, BufferID, modImpKind);
+    MainModule->addFile(*NextInput);
+    if (BufferID == PrimaryBufferID)
+      setPrimarySourceFile(NextInput);
+
+    bool Done;
+    do {
+      // Parser may stop at some erroneous constructions like #else, #endif
+      // or '}' in some cases, continue parsing until we are done
+      parseIntoSourceFile(*NextInput, BufferID, &Done, nullptr,
+                          &PersistentState, nullptr);
+    } while (!Done);
+  }
+
+  // Now parse the main file.
+  if (MainBufferID != NO_SUCH_BUFFER) {
+    SourceFile &MainFile =
+        MainModule->getMainSourceFile(Invocation.getSourceFileKind());
+
+    bool Done;
+    do {
+      parseIntoSourceFile(MainFile, MainFile.getBufferID().getValue(), &Done,
+                          nullptr, &PersistentState, nullptr);
+    } while (!Done);
+  }
 
   assert(Context->LoadedModules.size() == 1 &&
          "Loaded a module during parse-only");
+}
+
+void CompilerInstance::freeContextAndSIL() {
+  Context.reset();
+  TheSILModule.reset();
+  MainModule = nullptr;
+  SML = nullptr;
+  PrimarySourceFile = nullptr;
 }
